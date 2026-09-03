@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Not found &middot; GALENOS Trends{% endblock %}
+{% block content %}
+<section class="topic-header">
+  <h1>Page not found</h1>
+  <p class="topic-header__meta">That topic or month doesn't exist in this dataset.</p>
+  <p><a href="{{ url_for('index') }}">&larr; Back to the dashboard</a></p>
+</section>
+{% endblock %}

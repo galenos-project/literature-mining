@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="stats-strip">
+  <div class="stat">
+    <span class="stat__value">{{ "{:,}".format(stats.n_papers) }}</span>
+    <span class="stat__label">papers analysed</span>
+  </div>
+  <div class="stat">
+    <span class="stat__value">{{ "{:,}".format(stats.n_topics) }}</span>
+    <span class="stat__label">topics detected</span>
+  </div>
+  <div class="stat stat--trendy">
+    <span class="stat__value">{{ stats.n_trendy }}</span>
+    <span class="stat__label">trending now</span>
+  </div>
+  <div class="stat">
+    <span class="stat__value">{{ stats.date_lo[:4] if stats.date_lo else "&ndash;" }}&ndash;{{ stats.date_hi[:4] if stats.date_hi else "&ndash;" }}</span>
+    <span class="stat__label">corpus window</span>
+  </div>
+</section>
+
+<section class="ticker" aria-label="Currently trending topics">
+  <span class="ticker__label">Trending&nbsp;now</span>
+  <div class="ticker__items">
+    {% for t in trendy_topics %}
+    <a class="ticker__item" href="{{ url_for('topic_detail', topic_id=t.topic_id) }}">
+      <span class="ticker__arrow">&#9650;</span>{{ t.name }}
+    </a>
+    {% else %}
+    <span class="ticker__empty">No topics currently trending in this dataset.</span>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="panel panel--chart">
+  <div class="panel__head panel__head--row">
+    <div>
+      <h2>Topic mentions over time</h2>
+      <p class="panel__hint">Monthly mention counts, previous 10 years &middot; click a line to open that topic.</p>
+    </div>
+    <div class="chart-controls">
+      <div class="sort-toggle" role="group" aria-label="Sort topics shown">
+        <button type="button" class="sort-toggle__btn is-active" data-sort="rank">Trending</button>
+        <button type="button" class="sort-toggle__btn" data-sort="size">Largest</button>
+      </div>
+      <label class="count-select">
+        <span>Show</span>
+        <select id="trend-count-select">
+          <option value="10" selected>10 topics</option>
+          <option value="20">20 topics</option>
+          <option value="50">50 topics</option>
+        </select>
+      </label>
+    </div>
+  </div>
+  <div id="trend-chart" class="chart chart--tall"></div>
+</section>
+
+<section class="panel panel--explorer">
+  <div class="panel__head panel__head--row">
+    <div>
+      <h2>Explore a topic</h2>
+      <p class="panel__hint">Blue = actual mentions, amber = model-predicted mentions. Click any month to read the papers.</p>
+    </div>
+    <label class="topic-select">
+      <span>Topic</span>
+      <select id="topic-select"></select>
+    </label>
+  </div>
+  <div id="topic-chart" class="chart chart--tall"></div>
+  <div id="topic-keywords" class="keyword-chips"></div>
+</section>
+
+<section class="panel panel--scatter">
+  <div class="panel__head">
+    <h2>Paper landscape</h2>
+    <p class="panel__hint">~5 sampled papers per topic, positioned by text similarity. Trending topics are coloured; established topics are grey.</p>
+  </div>
+  <div id="scatter-chart" class="chart chart--tall"></div>
+</section>
+{% endblock %}
+
+{% block head %}
+<script>
+  window.GALENOS = {
+    defaultTopicIds: {{ default_topic_ids | tojson }},
+    urls: {
+      topics: "{{ url_for('api_topics') }}",
+      timeline: "/api/topics/__ID__/timeline",
+      topicPage: "/topic/__ID__",
+      monthPage: "/topic/__ID__/month/__YEAR__/__MONTH__",
+      paperScatter: "{{ url_for('api_paper_scatter') }}"
+    }
+  };
+</script>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/main.js') }}"></script>
+<script>GALENOS.page = "index";</script>
+{% endblock %}

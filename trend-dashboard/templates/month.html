@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% set month_names = ["", "January","February","March","April","May","June","July","August","September","October","November","December"] %}
+
+{% block title %}{{ topic.name }} &middot; {{ month_names[month] }} {{ year }}{% endblock %}
+
+{% block content %}
+<nav class="breadcrumb">
+  <a href="{{ url_for('index') }}">All topics</a> &rsaquo;
+  <a href="{{ url_for('topic_detail', topic_id=topic.topic_id) }}">{{ topic.name }}</a> &rsaquo;
+  {{ month_names[month] }} {{ year }}
+</nav>
+
+<section class="topic-header">
+  <h1>{{ topic.name }} &middot; {{ month_names[month] }} {{ year }}</h1>
+  <p class="topic-header__meta">{{ papers|length }} paper{{ "s" if papers|length != 1 else "" }} mentioning this topic this month</p>
+</section>
+
+<section class="paper-list">
+  {% for p in papers %}
+  <article class="paper-card">
+    <h3 class="paper-card__title">
+      {% if p.openalex_url %}<a href="{{ p.openalex_url }}" target="_blank" rel="noopener">{{ p.title }}</a>
+      {% else %}{{ p.title }}{% endif %}
+    </h3>
+    <p class="paper-card__meta">
+      {{ p.authors }} &middot; {{ p.publication_date }}
+      {% if p.fields_of_study %} &middot; {{ p.fields_of_study }}{% endif %}
+    </p>
+    {% if p.abstract %}<p class="paper-card__abstract">{{ p.abstract }}</p>{% endif %}
+  </article>
+  {% else %}
+  <p class="empty-state">No papers recorded for this topic in this month.</p>
+  {% endfor %}
+</section>
+{% endblock %}

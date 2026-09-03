@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+
+{% block title %}{{ topic.name }} &middot; GALENOS Trends{% endblock %}
+
+{% block content %}
+<nav class="breadcrumb"><a href="{{ url_for('index') }}">&larr; All topics</a></nav>
+
+<section class="topic-header">
+  <h1>{{ topic.name }}
+    {% if topic.is_trendy %}<span class="badge badge--trendy">&#9650; trending</span>{% endif %}
+  </h1>
+  <p class="topic-header__meta">
+    {{ "{:,}".format(topic.n_papers) }} papers mentioning this topic
+    {% if topic.is_trendy and topic.trend_rank %} &middot; trendiness rank {{ "%.2f"|format(topic.trend_rank) }}{% endif %}
+  </p>
+  <div class="keyword-chips">
+    {% for kw in topic.keywords %}<span class="chip">{{ kw }}</span>{% endfor %}
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel__head">
+    <h2>Monthly mentions: actual vs predicted</h2>
+    <p class="panel__hint">Click a point to read the papers published that month.</p>
+  </div>
+  <div id="topic-detail-chart" class="chart chart--tall"></div>
+</section>
+{% endblock %}
+
+{% block head %}
+<script>
+  window.GALENOS_TOPIC = {{ topic | tojson }};
+  window.GALENOS_TIMELINE = {{ timeline | tojson }};
+  window.GALENOS = { urls: { monthPage: "/topic/__ID__/month/__YEAR__/__MONTH__" } };
+</script>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/main.js') }}"></script>
+<script>GALENOS.page = "topic";</script>
+{% endblock %}

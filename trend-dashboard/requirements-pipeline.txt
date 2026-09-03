@@ -1,0 +1,9 @@
+# Dependencies for scripts/update_data_monthly.py only — the Flask app
+# itself (requirements.txt) doesn't need any of these.
+
+requests
+pandas
+bertopic
+torch
+openai
+nltk

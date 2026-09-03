@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# trend-dashboard: generated database and pipeline working data
+# (rebuilt by scripts/init_db.py, generate_sample_data.py, and
+#  scripts/update_data_monthly.py — not source, and the pipeline CSVs
+#  run to >1 GB)
+trend-dashboard/data/
+trend-dashboard/pipeline_data/
