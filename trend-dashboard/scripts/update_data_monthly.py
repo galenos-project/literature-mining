@@ -55,6 +55,7 @@ TREND_M_MONTHS = 6               # ...months, actual must exceed predicted to co
 TREND_HIDDEN_SIZE = 10          # GRU hidden units (both stacked layers)
 TREND_EPOCHS = 10
 TREND_BATCH_SIZE = 32
+TREND_LEAVE_K_OUT = 10         # topics held out (and predicted) per training run; 1 == exact leave-one-topic-out
 
 
 # ==========================================================================
@@ -338,8 +339,8 @@ def fit_topic_model(papers_df):
 
     # Instantiate UMAP and HDBSCAN with desired parameters
     # Ensure these are NOT dictionaries
-    umap_model = UMAP(n_neighbors=15, n_components=8, metric='cosine')
-    hdbscan_model = HDBSCAN(min_cluster_size=20, min_samples=5, metric='euclidean')
+    umap_model = UMAP(n_neighbors=15, n_components=10, metric='cosine')
+    hdbscan_model = HDBSCAN(min_cluster_size=20, min_samples=10, metric='euclidean')
 
     # Initialize BERTopic with more words per topic
     topic_model = BERTopic(
@@ -467,15 +468,20 @@ def build_monthly_mentions(paper_topic_matrix):
 # close to the original's specific (and slightly unusual) design rather
 # than "cleaned up", since matching it was the point:
 #
-#   - LEAVE-ONE-TOPIC-OUT TRAINING: for each topic, a fresh GRU is trained
-#     from scratch on every OTHER topic's monthly series, then used to
-#     predict that one held-out topic. This means one full model gets
-#     trained per topic -- N topics means N full training runs. Slow, but
-#     faithful to the original.
+#   - LEAVE-k-TOPICS-OUT TRAINING: topics are split into consecutive
+#     groups of TREND_LEAVE_K_OUT (k). For each group, a fresh GRU is
+#     trained from scratch on every topic OUTSIDE the group, then used to
+#     predict each of the k held-out topics. k == 1 is exact
+#     leave-one-topic-out, as in the original notebook -- N full training
+#     runs. k > 1 trades a tiny, unbiased change in each training set
+#     (N-k vs N-1 topics pooled) for a roughly k-fold speedup; no held-out
+#     topic ever contributes to the model that predicts it, so the
+#     no-self-leakage property is unchanged. The k topics in a group share
+#     one trained model, so they also share its ModelMAE in the output.
 #   - SHARED MINMAX SCALING: one MinMaxScaler is fit per training run,
-#     on the pooled raw values of every OTHER topic (not the held-out
-#     one), and that exact same fitted scaler is reused -- transform only,
-#     never refit -- to scale the held-out topic before prediction.
+#     on the pooled raw values of every training topic (never the held-out
+#     group), and that exact same fitted scaler is reused -- transform only,
+#     never refit -- to scale each held-out topic before prediction.
 #   - WINDOWING: `range(len(series) - look_back)` -- every look_back-month
 #     window predicts the very next month, right up to the last month in
 #     `series`. The original notebook used `- look_back - 1` here, dropping
@@ -528,13 +534,17 @@ def _build_series(monthly_mentions_df):
 
 
 def fit_trend_model(monthly_mentions_df, window=SLIDING_WINDOW_MONTHS, epochs=TREND_EPOCHS,
-                     batch_size=TREND_BATCH_SIZE, checkpoint_path=None):
+                     batch_size=TREND_BATCH_SIZE, leave_k_out=TREND_LEAVE_K_OUT,
+                     checkpoint_path=None):
     """Returns a DataFrame matching the trendy-predictions.csv format:
     ,Topic,TopicName,Trendy,RankSum,ModelMAE,Pred_M0,...,Pred_M{K-1}
 
-    Trains one leave-one-topic-out GRU per topic (see module note above) --
-    this is slow: expect roughly N_topics full training runs. Writes an
-    interim checkpoint to `checkpoint_path` every 100 topics, mirroring the
+    Trains one leave-`leave_k_out`-topics-out GRU per group of that many
+    topics (see module note above): roughly ceil(N_topics / leave_k_out)
+    full training runs. leave_k_out=1 is exact leave-one-topic-out (one run
+    per topic, slow); the default trades a small, unbiased change in each
+    training set for a ~leave_k_out-fold speedup. Writes an interim
+    checkpoint to `checkpoint_path` after every group, mirroring the
     original notebook's crash-safety behaviour on long runs.
     """
     try:
@@ -624,37 +634,47 @@ def fit_trend_model(monthly_mentions_df, window=SLIDING_WINDOW_MONTHS, epochs=TR
 
     series = _build_series(monthly_mentions_df)
     topic_ids = sorted(series.keys())
+    k = max(1, int(leave_k_out))
+    groups = [topic_ids[i:i + k] for i in range(0, len(topic_ids), k)]
+    print(f"  {len(topic_ids)} topics in {len(groups)} leave-{k}-out group(s); "
+          f"one GRU trained per group")
 
     rows = []
-    for idx, topic_id in enumerate(topic_ids):
-        other_topics = [t for t in topic_ids if t != topic_id]
-        model, scaler, mae = train_one_model(other_topics, series)
-        actual, predicted = predict_topic(model, scaler, topic_id, series)
+    done = 0
+    for gi, group in enumerate(groups):
+        held_out = set(group)
+        train_topic_ids = [t for t in topic_ids if t not in held_out]
+        model, scaler, mae = train_one_model(train_topic_ids, series)
 
-        if len(actual) == 0:
-            print(f"  topic {topic_id}: not enough monthly history to predict; skipping")
-            continue
+        for topic_id in group:
+            done += 1
+            actual, predicted = predict_topic(model, scaler, topic_id, series)
 
-        last_actual = actual[-TREND_M_MONTHS:]
-        last_pred = predicted[-TREND_M_MONTHS:]
-        mean_actual = float(np.mean(actual))
-        trendy, rank_sum = _trend_rank_and_flag(last_actual, last_pred, mean_actual)
+            if len(actual) == 0:
+                print(f"  topic {topic_id}: not enough monthly history to predict; skipping")
+                continue
 
-        row = {
-            "": topic_id,
-            "Topic": topic_id,
-            "TopicName": "",  # informational only; the importer uses topics.csv's Name as authoritative
-            "Trendy": bool(trendy),
-            "RankSum": rank_sum,
-            "ModelMAE": mae,
-        }
-        for i, p in enumerate(predicted):
-            row[f"Pred_M{i}"] = float(p)
-        rows.append(row)
+            last_actual = actual[-TREND_M_MONTHS:]
+            last_pred = predicted[-TREND_M_MONTHS:]
+            mean_actual = float(np.mean(actual))
+            trendy, rank_sum = _trend_rank_and_flag(last_actual, last_pred, mean_actual)
 
-        print(f"  [{idx + 1}/{len(topic_ids)}] topic {topic_id}: MAE={mae:.4f} trendy={trendy} rank={rank_sum:.4f}")
+            row = {
+                "": topic_id,
+                "Topic": topic_id,
+                "TopicName": "",  # informational only; the importer uses topics.csv's Name as authoritative
+                "Trendy": bool(trendy),
+                "RankSum": rank_sum,
+                "ModelMAE": mae,  # shared by every topic in this leave-k-out group
+            }
+            for i, p in enumerate(predicted):
+                row[f"Pred_M{i}"] = float(p)
+            rows.append(row)
 
-        if checkpoint_path and idx % 100 == 0:
+            print(f"  [{done}/{len(topic_ids)}] topic {topic_id} "
+                  f"(group {gi + 1}/{len(groups)}): MAE={mae:.4f} trendy={trendy} rank={rank_sum:.4f}")
+
+        if checkpoint_path:
             pd.DataFrame(rows).to_csv(checkpoint_path, index=False)
 
     return pd.DataFrame(rows)
