@@ -16,6 +16,8 @@ this is a full rebuild each run, not an incremental patch).
 
 Usage:
     python scripts/update_data_monthly.py --data-dir pipeline_data
+    python scripts/update_data_monthly.py --data-dir pipeline_data --fetch-only  # fetch + dedupe papers.csv, then stop
+    python scripts/update_data_monthly.py --data-dir pipeline_data --topic-model-only  # topic stage only: refit + name + write topics.csv/paper_topic_assignments.csv, then stop
     python scripts/update_data_monthly.py --data-dir pipeline_data --skip-fetch  # rerun modelling only
     python scripts/update_data_monthly.py --data-dir pipeline_data --skip-fetch --skip-topic-model # rerun trend prediction only
 """
@@ -131,7 +133,8 @@ def fetch_new_papers(since_date, filter_str=OPENALEX_FILTER, mailto=OPENALEX_MAI
         mid-page, there could be other papers with that exact same date
         still unfetched. Re-including that one day means a handful of
         already-fetched papers get refetched (harmless -- merge_papers()
-        dedupes by PaperId), which is a small price for not silently
+        dedupes by PaperId and by title+abstract), which is a small price
+        for not silently
         missing same-day papers.
       - complete: False if a network error cut the fetch short (results
         are sorted oldest-first, so `rows` is everything from `since_date`
@@ -213,10 +216,37 @@ def fetch_new_papers(since_date, filter_str=OPENALEX_FILTER, mailto=OPENALEX_MAI
     return rows, resume_date, True
 
 
+def _normalize_text(series):
+    """Lowercase, collapse internal whitespace and strip surrounding
+    whitespace/punctuation, so trivially different renderings of the same
+    title or abstract compare equal."""
+    return (
+        series.fillna("")
+        .astype(str)
+        .str.lower()
+        .str.replace(r"\s+", " ", regex=True)
+        .str.strip()
+        .str.strip(".,;:-–— ")
+    )
+
+
 def merge_papers(existing_df, new_rows):
-    """Append new_rows to existing_df, deduped by PaperId (new rows win on
-    conflict, though a from_publication_date filter should make conflicts
-    rare)."""
+    """Append new_rows to existing_df and dedupe, in two passes:
+
+      1. by PaperId -- new rows win on conflict, though the
+         from_publication_date filter should make those rare;
+      2. by normalized title + abstract -- OpenAlex sometimes indexes the
+         same paper under more than one work id (a preprint and its
+         published version, or a plain duplicate record), so identical
+         content slips past the PaperId pass. The copy with the longest
+         abstract is kept, ties broken by the earliest PubDate, on the
+         assumption that's the most complete / canonical record.
+
+    Rows with neither a title nor an abstract are dropped outright -- they
+    carry nothing for the topic model. Both cleanups run over the whole
+    merged corpus, so they also tidy up anything already sitting in an
+    existing papers.csv from earlier runs.
+    """
     new_df = pd.DataFrame(new_rows)
     if existing_df is None or existing_df.empty:
         merged = new_df
@@ -224,8 +254,45 @@ def merge_papers(existing_df, new_rows):
         merged = existing_df
     else:
         merged = pd.concat([existing_df, new_df], ignore_index=True)
-    if not merged.empty:
-        merged = merged.drop_duplicates(subset="PaperId", keep="last").reset_index(drop=True)
+
+    if merged.empty:
+        return merged
+
+    n_before = len(merged)
+    merged = merged.drop_duplicates(subset="PaperId", keep="last").reset_index(drop=True)
+    n_after_id = len(merged)
+    n_empty = 0
+
+    if {"PaperTitle", "Abstract"}.issubset(merged.columns):
+        norm_abstract = _normalize_text(merged["Abstract"])
+        content_key = _normalize_text(merged["PaperTitle"]) + "\x1f" + norm_abstract
+
+        # Drop rows with neither a title nor an abstract -- nothing to model.
+        has_content = content_key.str.strip("\x1f ") != ""
+        n_empty = int((~has_content).sum())
+        merged = merged[has_content].reset_index(drop=True)
+        norm_abstract = norm_abstract[has_content].reset_index(drop=True)
+        content_key = content_key[has_content].reset_index(drop=True)
+
+        # Visit the richest copy (longest abstract, then earliest PubDate)
+        # first so duplicated(keep="first") drops the poorer copies.
+        rank = pd.DataFrame({
+            "abstract_len": norm_abstract.str.len(),
+            "pubdate": pd.to_datetime(merged.get("PubDate"), errors="coerce"),
+        })
+        visit_order = rank.sort_values(
+            ["abstract_len", "pubdate"], ascending=[False, True]
+        ).index
+        drop_idx = visit_order[content_key.loc[visit_order].duplicated(keep="first")]
+        merged = merged.drop(index=drop_idx).reset_index(drop=True)
+
+    n_after_content = len(merged)
+    if n_before != n_after_id:
+        print(f"  deduped {n_before - n_after_id} paper(s) sharing a PaperId")
+    if n_empty:
+        print(f"  dropped {n_empty} paper(s) with no title or abstract")
+    if n_after_id - n_empty != n_after_content:
+        print(f"  deduped {n_after_id - n_empty - n_after_content} paper(s) with a duplicate title + abstract")
     return merged
 
 # ==========================================================================
@@ -271,8 +338,8 @@ def fit_topic_model(papers_df):
 
     # Instantiate UMAP and HDBSCAN with desired parameters
     # Ensure these are NOT dictionaries
-    umap_model = UMAP(n_neighbors=10, n_components=15, metric='cosine')
-    hdbscan_model = HDBSCAN(min_cluster_size=15, min_samples=15, metric='euclidean')
+    umap_model = UMAP(n_neighbors=15, n_components=8, metric='cosine')
+    hdbscan_model = HDBSCAN(min_cluster_size=20, min_samples=5, metric='euclidean')
 
     # Initialize BERTopic with more words per topic
     topic_model = BERTopic(
@@ -288,6 +355,25 @@ def fit_topic_model(papers_df):
 
     topic_distr, _ = topic_model.approximate_distribution(docs)
     return topic_model, docs, topic_distr
+
+
+def summarize_topic_model(topic_model):
+    """Print how the current clustering parameters carved up the corpus:
+    topic count, the share of documents left in the -1 outlier bucket, and
+    the spread of topic sizes -- the numbers to watch when tuning
+    min_cluster_size / n_neighbors for larger or smaller topics."""
+    info = topic_model.get_topic_info()  # one row per topic, includes -1
+    total = int(info["Count"].sum())
+    n_outliers = int(info.loc[info["Topic"] == -1, "Count"].sum())
+    sizes = info.loc[info["Topic"] != -1, "Count"]
+
+    print(f"  {len(sizes)} topics; {n_outliers} / {total} docs "
+          f"({n_outliers / total:.1%}) left as -1 outliers")
+    if not sizes.empty:
+        print(f"  topic sizes -- min {int(sizes.min())}, median {int(sizes.median())}, "
+              f"mean {sizes.mean():.0f}, max {int(sizes.max())}")
+        for thresh in (20, 30, 50):
+            print(f"    {int((sizes < thresh).sum())} topic(s) with < {thresh} papers")
 
 
 # ==========================================================================
@@ -609,7 +695,8 @@ def latest_pub_date(papers_df):
     return dates.max().date() if not dates.empty else None
 
 
-def run_pipeline(data_dir, since=None, skip_fetch=False, skip_topic_model=False):
+def run_pipeline(data_dir, since=None, skip_fetch=False, skip_topic_model=False,
+                 fetch_only=False, topic_model_only=False):
     os.makedirs(data_dir, exist_ok=True)
     papers_path = os.path.join(data_dir, "papers.csv")
     topics_path = os.path.join(data_dir, "topics.csv")
@@ -644,6 +731,16 @@ def run_pipeline(data_dir, since=None, skip_fetch=False, skip_topic_model=False)
                 "incomplete_fetch": True,
             }
 
+        if fetch_only:
+            print()
+            print(f"  --fetch-only set; wrote {len(papers_df)} papers to {papers_path}. "
+                  "Stopping before the topic/trend model.")
+            return {
+                "papers": papers_path, "topics": topics_path, "monthly": monthly_path,
+                "predictions": predictions_path, "paper_topics": paper_topics_path,
+                "fetch_only": True,
+            }
+
         if skip_topic_model and new_rows:
             print(f"  WARNING: {len(new_rows)} new paper(s) were fetched but --skip-topic-model means "
                   "they won't be topic-modelled or counted below, since the paper-topic matrix is being "
@@ -652,7 +749,8 @@ def run_pipeline(data_dir, since=None, skip_fetch=False, skip_topic_model=False)
 
     if skip_fetch:
         print(f"  corpus now has {len(papers_df)} papers total")
-        papers_df.to_csv(papers_path, index=False)
+        if not topic_model_only:  # --topic-model-only doesn't touch the corpus file
+            papers_df.to_csv(papers_path, index=False)
 
     if skip_topic_model:
         print("[2-4/6] --skip-topic-model set; reloading topics and paper-topic matrix from --data-dir...")
@@ -671,6 +769,7 @@ def run_pipeline(data_dir, since=None, skip_fetch=False, skip_topic_model=False)
         topic_model, docs, topic_distr = fit_topic_model(papers_df)
         n_topics = topic_distr.shape[1]
         print(f"  found {n_topics} topics across {len(docs)} documents")
+        summarize_topic_model(topic_model)
 
         print("[3/6] Naming topics...")
         names_and_keywords = name_topics(topic_model)
@@ -685,6 +784,20 @@ def run_pipeline(data_dir, since=None, skip_fetch=False, skip_topic_model=False)
         print("[4/6] Building the binary paper-topic assignment matrix...")
         paper_topic_matrix = build_paper_topic_matrix(papers_df, topic_distr)
         paper_topic_matrix.to_csv(paper_topics_path, index=False)
+
+        if topic_model_only:
+            print()
+            print(f"  --topic-model-only set; wrote {topics_path} ({len(topics_df)} topics) "
+                  f"and {paper_topics_path}. Stopped before monthly mentions, the trend "
+                  "model and the DB reload.")
+            print(f"  To finish from here without refitting: "
+                  f"python scripts/update_data_monthly.py --data-dir {data_dir} "
+                  "--skip-fetch --skip-topic-model")
+            return {
+                "papers": papers_path, "topics": topics_path, "monthly": monthly_path,
+                "predictions": predictions_path, "paper_topics": paper_topics_path,
+                "topic_model_only": True,
+            }
 
     print("[5/6] Building monthly mention counts...")
     monthly_df = build_monthly_mentions(paper_topic_matrix)
@@ -739,20 +852,38 @@ def main():
     parser.add_argument("--skip-fetch", action="store_true",
                          help="skip the OpenAlex fetch and just re-run modelling on the existing corpus "
                               "(useful for testing, or if you fetched papers separately)")
+    parser.add_argument("--fetch-only", action="store_true",
+                         help="run only the OpenAlex fetch + dedupe, write papers.csv, then stop "
+                              "before the topic/trend model (implies --skip-db-reload)")
     parser.add_argument("--skip-topic-model", action="store_true",
                          help="skip refitting BERTopic and naming topics; reload topics.csv and "
                               "paper_topic_assignments.csv from --data-dir instead (from a previous full "
                               "run), then just rebuild monthly mentions and rerun the trend model. Combine "
                               "with --skip-fetch when debugging the trend model on unchanged data.")
+    parser.add_argument("--topic-model-only", action="store_true",
+                         help="run just the topic stage on the existing corpus: refit BERTopic, "
+                              "print a topic-count / size summary, LLM-name the topics, and write "
+                              "topics.csv + paper_topic_assignments.csv -- then stop before the "
+                              "monthly mentions, trend model and DB reload. Resume with "
+                              "--skip-fetch --skip-topic-model.")
     parser.add_argument("--skip-db-reload", action="store_true",
                          help="write the CSVs but don't touch data/galenos.db")
     args = parser.parse_args()
 
-    since = datetime.strptime(args.since, "%Y-%m-%d").date() if args.since else None
-    paths = run_pipeline(args.data_dir, since=since, skip_fetch=args.skip_fetch,
-                          skip_topic_model=args.skip_topic_model)
+    if args.fetch_only and args.skip_fetch:
+        parser.error("--fetch-only and --skip-fetch are mutually exclusive")
+    if args.topic_model_only and (args.fetch_only or args.skip_topic_model):
+        parser.error("--topic-model-only can't be combined with --fetch-only or --skip-topic-model")
 
-    if not args.skip_db_reload:
+    since = datetime.strptime(args.since, "%Y-%m-%d").date() if args.since else None
+    paths = run_pipeline(args.data_dir, since=since,
+                          skip_fetch=args.skip_fetch or args.topic_model_only,
+                          skip_topic_model=args.skip_topic_model, fetch_only=args.fetch_only,
+                          topic_model_only=args.topic_model_only)
+
+    if paths.get("fetch_only") or paths.get("incomplete_fetch") or paths.get("topic_model_only"):
+        print("Skipping database reload.")
+    elif not args.skip_db_reload:
         reload_database(paths)
     else:
         print("--skip-db-reload set; run scripts/import_notebook_outputs.py yourself when ready.")
