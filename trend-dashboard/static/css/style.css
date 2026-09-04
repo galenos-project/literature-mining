@@ -326,7 +326,13 @@ a:focus-visible, select:focus-visible, button:focus-visible {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--paper);
-  min-width: 260px;
+  /* fixed width (not min-width) so a long topic name can't force the
+     closed control wider than the panel; the option text just truncates */
+  width: 260px;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ---- Topic search ---------------------------------------------------*/
@@ -383,7 +389,8 @@ a:focus-visible, select:focus-visible, button:focus-visible {
   cursor: pointer;
 }
 .topic-search__result:hover,
-.topic-search__result.is-active {
+.topic-search__result.is-active,
+.topic-search__result[aria-selected="true"] {
   background: var(--teal-soft);
 }
 .topic-search__result mark {
@@ -406,6 +413,127 @@ a:focus-visible, select:focus-visible, button:focus-visible {
   padding: 0.5rem 0.55rem;
   color: var(--muted);
   font-size: 0.83rem;
+}
+
+.topic-search__result-check {
+  display: inline-block;
+  width: 1.1em;
+  color: var(--teal);
+}
+
+.topic-search__addall {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font-family: var(--font-body);
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--teal);
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  border-radius: var(--radius) var(--radius) 0 0;
+  padding: 0.4rem 0.55rem 0.55rem;
+  margin-bottom: 0.2rem;
+  cursor: pointer;
+}
+.topic-search__addall:hover { background: var(--teal-soft); }
+
+/* Small text-only action button (e.g. "+ Add all trending topics"). */
+.link-btn {
+  align-self: flex-start;
+  font-family: var(--font-body);
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--teal);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+.link-btn:hover { text-decoration: underline; }
+
+/* ---- Selected topics (multi-select explorer) --------------------------*/
+
+.selected-topics {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper-raised);
+  padding: 0.7rem 0.9rem;
+  margin-bottom: 1.2rem;
+}
+
+.selected-topics__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.selected-topics__count {
+  font-size: 0.78rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.selected-topics__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.selected-topics__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: var(--ink);
+  background: var(--teal-soft);
+  border-radius: 999px;
+  padding: 0.25rem 0.4rem 0.25rem 0.65rem;
+}
+
+.selected-topics__chip-remove {
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  line-height: 1;
+  color: var(--teal);
+  background: none;
+  border: none;
+  border-radius: 999px;
+  width: 1.3em;
+  height: 1.3em;
+  cursor: pointer;
+}
+.selected-topics__chip-remove:hover { background: rgba(43, 110, 104, 0.18); }
+
+/* ---- Stacked per-topic charts ------------------------------------------*/
+
+.topic-chart-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+}
+
+.topic-chart-block {
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--line);
+}
+.topic-chart-block:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+
+.topic-chart-block__title {
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin: 0 0 0.75rem;
 }
 
 .keyword-chips {

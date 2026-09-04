@@ -72,6 +72,8 @@
   function initIndexPage() {
     const urls = window.GALENOS.urls;
     let allTopics = [];
+    let topicsById = new Map();
+    let selectedTopicIds = []; // ordered, de-duplicated topic ids currently shown below
     let trendChartTopicIds = []; // curveNumber -> topic_id, for click-through
     let trendSortMode = "rank";
     let trendTopicCount = 10;
@@ -80,14 +82,18 @@
       .then((r) => r.json())
       .then((topics) => {
         allTopics = topics;
+        topicsById = new Map(topics.map((t) => [Number(t.topic_id), t]));
         populateTopicSelect(topics);
         initTopicSearch();
         renderTrendChart();
-        const first = window.GALENOS.defaultTopicIds[0] || (topics[0] && topics[0].topic_id);
-        if (first != null) {
-          document.getElementById("topic-select").value = first;
-          renderTopicChart(first);
-        }
+        // Default to just the single top-trending topic (defaultTopicIds
+        // is already ordered by trend_rank desc, same list the trend
+        // chart's default view uses) rather than the whole top-N.
+        const topTrending = (window.GALENOS.defaultTopicIds || [])[0];
+        const fallback = topics[0] && topics[0].topic_id;
+        const initialId = topTrending != null ? Number(topTrending) : fallback != null ? Number(fallback) : null;
+        selectedTopicIds = initialId != null && topicsById.has(initialId) ? [initialId] : [];
+        renderSelectedTopics();
       });
 
     fetch(urls.paperScatter)
@@ -95,7 +101,19 @@
       .then(renderPaperScatter);
 
     document.getElementById("topic-select").addEventListener("change", (e) => {
-      renderTopicChart(e.target.value);
+      if (e.target.value) addToSelection(e.target.value);
+      e.target.value = ""; // reset to the placeholder so it can be used again
+      renderSelectedTopics();
+    });
+
+    document.getElementById("add-trendy-btn").addEventListener("click", () => {
+      allTopics.filter((t) => t.is_trendy).forEach((t) => addToSelection(t.topic_id));
+      renderSelectedTopics();
+    });
+
+    document.getElementById("clear-selected-btn").addEventListener("click", () => {
+      selectedTopicIds = [];
+      renderSelectedTopics();
     });
 
     document.querySelectorAll(".sort-toggle__btn").forEach((btn) => {
@@ -113,9 +131,26 @@
       renderTrendChart();
     });
 
+    function isSelected(id) {
+      return selectedTopicIds.includes(Number(id));
+    }
+
+    function addToSelection(id) {
+      id = Number(id);
+      if (topicsById.has(id) && !selectedTopicIds.includes(id)) selectedTopicIds.push(id);
+    }
+
+    function toggleSelection(id) {
+      id = Number(id);
+      const idx = selectedTopicIds.indexOf(id);
+      if (idx >= 0) selectedTopicIds.splice(idx, 1);
+      else if (topicsById.has(id)) selectedTopicIds.push(id);
+      renderSelectedTopics();
+    }
+
     function populateTopicSelect(topics) {
       const select = document.getElementById("topic-select");
-      select.innerHTML = "";
+      select.innerHTML = '<option value="" selected disabled>Choose a topic\u2026</option>';
       topics.forEach((t) => {
         const opt = document.createElement("option");
         opt.value = t.topic_id;
@@ -125,13 +160,13 @@
     }
 
     // Free-text topic search: filters the already-loaded `allTopics` by
-    // name OR keyword and shows a dropdown of matches. Picking one drives
-    // the "Explore a topic" chart below (keeps the search in context).
+    // name OR keyword and shows a dropdown of matches. Clicking a result
+    // (or its checkbox) toggles it into the multi-topic selection below;
+    // the dropdown stays open so several topics can be added in a row.
     function initTopicSearch() {
       const input = document.getElementById("topic-search");
       const results = document.getElementById("topic-search-results");
       if (!input || !results) return;
-      const select = document.getElementById("topic-select");
       let matches = [];
       let activeIndex = -1;
 
@@ -168,14 +203,32 @@
           li.textContent = "No topics match \u201C" + q + "\u201D";
           results.appendChild(li);
         } else {
+          const addAllLi = document.createElement("li");
+          const addAllBtn = document.createElement("button");
+          addAllBtn.type = "button";
+          addAllBtn.className = "topic-search__addall";
+          addAllBtn.textContent =
+            "+ Add all " + matches.length + " result" + (matches.length === 1 ? "" : "s");
+          addAllBtn.addEventListener("click", () => {
+            matches.forEach((t) => addToSelection(t.topic_id));
+            renderSelectedTopics();
+            render(); // refresh checkmarks without closing the dropdown
+          });
+          addAllLi.appendChild(addAllBtn);
+          results.appendChild(addAllLi);
+
           matches.forEach((t) => {
             const li = document.createElement("li");
             li.setAttribute("role", "option");
             const btn = document.createElement("button");
             btn.type = "button";
             btn.className = "topic-search__result";
+            btn.setAttribute("aria-selected", String(isSelected(t.topic_id)));
             const kws = matchingKeywords(t, q);
             btn.innerHTML =
+              '<span class="topic-search__result-check" aria-hidden="true">' +
+              (isSelected(t.topic_id) ? "\u2611" : "\u2610") +
+              "</span>" +
               (t.is_trendy ? "\u25B2 " : "") +
               highlightMatch(t.name || "(unnamed topic)", q) +
               (kws.length
@@ -183,30 +236,16 @@
                   kws.map((k) => highlightMatch(k, q)).join(", ") +
                   "</span>"
                 : "");
-            btn.addEventListener("click", () => choose(t));
+            btn.addEventListener("click", () => {
+              toggleSelection(t.topic_id);
+              render(); // stays open, checkmark flips, so more can be added
+            });
             li.appendChild(btn);
             results.appendChild(li);
           });
         }
         results.hidden = false;
         input.setAttribute("aria-expanded", "true");
-      }
-
-      function choose(topic) {
-        if (![...select.options].some((o) => o.value === String(topic.topic_id))) {
-          const opt = document.createElement("option");
-          opt.value = topic.topic_id;
-          opt.textContent = (topic.is_trendy ? "\u25B2 " : "") + topic.name;
-          select.appendChild(opt);
-        }
-        select.value = topic.topic_id;
-        renderTopicChart(topic.topic_id);
-        input.value = "";
-        matches = [];
-        close();
-        document
-          .getElementById("topic-chart")
-          .scrollIntoView({ behavior: "smooth", block: "nearest" });
       }
 
       function moveActive(delta) {
@@ -232,7 +271,8 @@
         } else if (e.key === "Enter") {
           if (matches.length) {
             e.preventDefault();
-            choose(matches[activeIndex >= 0 ? activeIndex : 0]);
+            toggleSelection(matches[activeIndex >= 0 ? activeIndex : 0].topic_id);
+            render();
           }
         } else if (e.key === "Escape") {
           input.value = "";
@@ -355,10 +395,71 @@
       });
     }
 
-    function renderTopicChart(topicId) {
+    // Rebuilds the chip bar and the stacked chart list from
+    // `selectedTopicIds`. Called after any change to the selection.
+    function renderSelectedTopics() {
+      const bar = document.getElementById("selected-topics-bar");
+      const chipsEl = document.getElementById("selected-topics-chips");
+      const countEl = document.getElementById("selected-topics-count");
+      const listEl = document.getElementById("topic-chart-list");
+      const emptyEl = document.getElementById("topic-chart-empty");
+
+      countEl.textContent = selectedTopicIds.length;
+      bar.hidden = selectedTopicIds.length === 0;
+
+      chipsEl.innerHTML = "";
+      selectedTopicIds.forEach((id) => {
+        const t = topicsById.get(id);
+        if (!t) return;
+        const li = document.createElement("li");
+        li.className = "selected-topics__chip";
+        const label = document.createElement("span");
+        label.textContent = (t.is_trendy ? "▲ " : "") + t.name;
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "selected-topics__chip-remove";
+        remove.setAttribute("aria-label", "Remove " + t.name);
+        remove.textContent = "×";
+        remove.addEventListener("click", () => toggleSelection(id));
+        li.appendChild(label);
+        li.appendChild(remove);
+        chipsEl.appendChild(li);
+      });
+
+      listEl.innerHTML = "";
+      emptyEl.hidden = selectedTopicIds.length !== 0;
+      selectedTopicIds.forEach((id) => {
+        const t = topicsById.get(id);
+        if (!t) return;
+        const block = document.createElement("div");
+        block.className = "topic-chart-block";
+        const heading = document.createElement("h3");
+        heading.className = "topic-chart-block__title";
+        heading.textContent = (t.is_trendy ? "▲ " : "") + t.name;
+        const chartDiv = document.createElement("div");
+        chartDiv.id = "topic-chart-" + id;
+        chartDiv.className = "chart chart--tall";
+        const kwDiv = document.createElement("div");
+        kwDiv.id = "topic-keywords-" + id;
+        kwDiv.className = "keyword-chips";
+        block.appendChild(heading);
+        block.appendChild(chartDiv);
+        block.appendChild(kwDiv);
+        listEl.appendChild(block);
+        renderOneTopicChart(id);
+      });
+    }
+
+    function renderOneTopicChart(topicId) {
+      const chartId = "topic-chart-" + topicId;
+      const kwId = "topic-keywords-" + topicId;
       fetch(fillUrl(urls.timeline, { ID: topicId }))
         .then((r) => r.json())
         .then((res) => {
+          // The selection (and so the DOM) may have changed again before
+          // this fetch resolved -- bail rather than plot into a stale/gone div.
+          if (!document.getElementById(chartId)) return;
+
           const months = res.timeline.map((row) => row.month);
           const actual = {
             x: months,
@@ -376,27 +477,27 @@
             line: { color: "#D98A3D", width: 2, dash: "dot" },
           };
           Plotly.newPlot(
-            "topic-chart",
+            chartId,
             [actual, predicted],
             baseLayout({ yaxis: { title: "Mentions / month", gridcolor: "#E8EAED", rangemode: "tozero" } }),
             PLOTLY_CONFIG
           );
 
-          const chartEl = document.getElementById("topic-chart");
-          chartEl.removeAllListeners && chartEl.removeAllListeners("plotly_click");
-          chartEl.on("plotly_click", (data) => {
+          document.getElementById(chartId).on("plotly_click", (data) => {
             const month = data.points[0].x;
             goToMonth(urls, topicId, month);
           });
 
-          const kwContainer = document.getElementById("topic-keywords");
-          kwContainer.innerHTML = "";
-          (res.topic.keywords || []).forEach((kw) => {
-            const chip = document.createElement("span");
-            chip.className = "chip";
-            chip.textContent = kw;
-            kwContainer.appendChild(chip);
-          });
+          const kwContainer = document.getElementById(kwId);
+          if (kwContainer) {
+            kwContainer.innerHTML = "";
+            (res.topic.keywords || []).forEach((kw) => {
+              const chip = document.createElement("span");
+              chip.className = "chip";
+              chip.textContent = kw;
+              kwContainer.appendChild(chip);
+            });
+          }
         });
     }
   }
