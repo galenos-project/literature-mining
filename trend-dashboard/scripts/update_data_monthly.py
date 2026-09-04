@@ -51,12 +51,15 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")      # DeepInfra token (used w
 ASSIGNMENT_THRESHOLD = 0.08     # per the paper's methodology
 SLIDING_WINDOW_MONTHS = 6       # per the paper's methodology
 TREND_N_MONTHS = 4              # of the last...
-TREND_M_MONTHS = 6               # ...months, actual must exceed predicted to count as trendy
+TREND_M_MONTHS = 6               # ...months, actual must exceed predicted (the paper's rule) -- AND:
+TREND_RECENT_N_MONTHS = 2      # of the last...
+TREND_RECENT_M_MONTHS = 3      # ...months, actual must ALSO exceed predicted (outperformance still current)
+TREND_MIN_SLOPE = 0.0         # AND the OLS slope of actual over the last TREND_M_MONTHS must exceed this
 TREND_HIDDEN_SIZE = 10          # GRU hidden units (both stacked layers)
 TREND_EPOCHS = 10
 TREND_BATCH_SIZE = 32
 TREND_LEAVE_K_OUT = 10         # topics held out (and predicted) per training run; 1 == exact leave-one-topic-out
-TREND_SIZE_NORM_EXPONENT = 0.5 # RankSum denominator is mean_actual ** this. 1.0 = original (÷mean, biased
+TREND_SIZE_NORM_EXPONENT = 0.6 # RankSum denominator is mean_actual ** this. 1.0 = original (÷mean, biased
                                # toward small/noisy topics); 0.5 = ÷Poisson SD, ~size-neutral; 0.0 = no size norm
 
 
@@ -341,8 +344,8 @@ def fit_topic_model(papers_df):
 
     # Instantiate UMAP and HDBSCAN with desired parameters
     # Ensure these are NOT dictionaries
-    umap_model = UMAP(n_neighbors=15, n_components=10, metric='cosine')
-    hdbscan_model = HDBSCAN(min_cluster_size=20, min_samples=10, metric='euclidean')
+    umap_model = UMAP(n_neighbors=20, n_components=15, metric='cosine')
+    hdbscan_model = HDBSCAN(min_cluster_size=25, min_samples=15, metric='euclidean')
 
     # Initialize BERTopic with more words per topic
     topic_model = BERTopic(
@@ -493,6 +496,11 @@ def build_monthly_mentions(paper_topic_matrix):
 #     before it ever reaches this function) -- so `series` is already
 #     guaranteed to end on a complete month, and this windowing can use
 #     all of it rather than quietly discarding one more.
+#   - TRENDY FLAG: the paper's rule (actual > predicted in >=
+#     TREND_N_MONTHS of the last TREND_M_MONTHS) AND-ed with two extra
+#     gates -- a recency check (>= TREND_RECENT_N_MONTHS of the last
+#     TREND_RECENT_M_MONTHS) and a positive OLS slope of actual over the
+#     last TREND_M_MONTHS. See _trend_rank_and_flag().
 #   - RankSum is computed for every topic,
 #     weighting each of the last TREND_M_MONTHS months by
 #     e^(1/(TREND_M_MONTHS - i)) -- i.e. putting more weight on the most
@@ -516,22 +524,38 @@ def make_windows(values, look_back):
 
 
 def _trend_rank_and_flag(actual_tail, predicted_tail, mean_actual, n=TREND_N_MONTHS, m=TREND_M_MONTHS,
-                          size_norm_exponent=TREND_SIZE_NORM_EXPONENT):
-    """Trendiness scoring, following the original paper: trendy if actual
-    exceeded predicted in >= n of the last m months; RankSum sums the
-    positive monthly excesses (actual - predicted), each weighted by
-    e^(1/(m-i)) (i=0 oldest of the m, i=m-1 most recent), computed
-    regardless of the Trendy flag.
+                          recent_n=TREND_RECENT_N_MONTHS, recent_m=TREND_RECENT_M_MONTHS,
+                          min_slope=TREND_MIN_SLOPE, size_norm_exponent=TREND_SIZE_NORM_EXPONENT):
+    """Trendiness scoring, extending the original paper's rule. A topic is
+    flagged trendy only if ALL of:
+      1. actual > predicted in >= n of the last m months (the paper's rule);
+      2. actual > predicted in >= recent_n of the last recent_m months, so
+         the outperformance is still current rather than fading;
+      3. the ordinary-least-squares slope of actual over the last m months
+         is > min_slope, so the counts are genuinely rising and not merely
+         sitting above an under-shooting prediction.
 
-    The excess sum is then divided by `max(mean_actual, 1) ** size_norm_exponent`.
-    The original used the plain mean (exponent 1.0), which over-normalizes:
-    monthly counts are ~Poisson, so their noise scales as sqrt(mean), and
-    dividing an absolute excess by the mean leaves small topics with an
-    inflated score from noise alone. Exponent 0.5 divides by the Poisson
-    standard deviation instead, which is roughly size-neutral under the
-    null; 0.0 disables size normalization entirely."""
+    RankSum is unchanged and still returned for every topic regardless of
+    the flag: it sums the positive monthly excesses (actual - predicted),
+    each weighted by e^(1/(m-i)) (i=0 oldest of the m, i=m-1 most recent),
+    divided by `max(mean_actual, 1) ** size_norm_exponent`. The original
+    used exponent 1.0 (plain mean), which over-normalizes -- monthly counts
+    are ~Poisson, so noise scales as sqrt(mean), and dividing an absolute
+    excess by the mean leaves small topics with an inflated score from
+    noise alone. 0.5 divides by the Poisson standard deviation instead
+    (~size-neutral under the null); 0.0 disables it."""
     exceed_count = sum(1 for a, p in zip(actual_tail, predicted_tail) if a > p)
-    trendy = exceed_count >= n
+    recent_exceed = sum(
+        1 for a, p in zip(actual_tail[-recent_m:], predicted_tail[-recent_m:]) if a > p
+    )
+    if len(actual_tail) >= 2:
+        xs = np.arange(len(actual_tail), dtype=float)
+        slope = float(np.polyfit(xs, np.asarray(actual_tail, dtype=float), 1)[0])
+    else:
+        slope = 0.0
+
+    trendy = exceed_count >= n and recent_exceed >= recent_n and slope > min_slope
+
     terms = [
         0.0 if a < p else float((a - p) * math.exp(1 / (m - i)))
         for i, (a, p) in enumerate(zip(actual_tail, predicted_tail))
