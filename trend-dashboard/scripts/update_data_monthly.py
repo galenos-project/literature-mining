@@ -342,8 +342,8 @@ def fit_topic_model(papers_df):
 
     # Instantiate UMAP and HDBSCAN with desired parameters
     # Ensure these are NOT dictionaries
-    umap_model = UMAP(n_neighbors=20, n_components=15, metric='cosine')
-    hdbscan_model = HDBSCAN(min_cluster_size=25, min_samples=15, metric='euclidean')
+    umap_model = UMAP(n_neighbors=18, n_components=12, metric='cosine')
+    hdbscan_model = HDBSCAN(min_cluster_size=22, min_samples=15, metric='euclidean')
 
     # Initialize BERTopic with more words per topic
     topic_model = BERTopic(
