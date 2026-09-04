@@ -52,14 +52,12 @@ ASSIGNMENT_THRESHOLD = 0.08     # per the paper's methodology
 SLIDING_WINDOW_MONTHS = 6       # per the paper's methodology
 TREND_N_MONTHS = 4              # of the last...
 TREND_M_MONTHS = 6               # ...months, actual must exceed predicted (the paper's rule) -- AND:
-TREND_RECENT_N_MONTHS = 2      # of the last...
-TREND_RECENT_M_MONTHS = 3      # ...months, actual must ALSO exceed predicted (outperformance still current)
 TREND_MIN_SLOPE = 0.0         # AND the OLS slope of actual over the last TREND_M_MONTHS must exceed this
 TREND_HIDDEN_SIZE = 10          # GRU hidden units (both stacked layers)
 TREND_EPOCHS = 10
 TREND_BATCH_SIZE = 32
 TREND_LEAVE_K_OUT = 10         # topics held out (and predicted) per training run; 1 == exact leave-one-topic-out
-TREND_SIZE_NORM_EXPONENT = 0.6 # RankSum denominator is mean_actual ** this. 1.0 = original (÷mean, biased
+TREND_SIZE_NORM_EXPONENT = 0.55 # RankSum denominator is mean_actual ** this. 1.0 = original (÷mean, biased
                                # toward small/noisy topics); 0.5 = ÷Poisson SD, ~size-neutral; 0.0 = no size norm
 
 
@@ -412,7 +410,7 @@ def name_topics(topic_model):
     for topic_id in topic_ids:
         keywords = [w for w, _ in topic_model.get_topic(topic_id)[:15]]
         try:
-            name = generateFromPrompt(f"Please give a concise word or phrase to describe the main research topic within the field of mental health that unifies the following words and indicates the mental health relevance: {keywords}. Please return only the word or phrase with no explanation. Topic: ")
+            name = generateFromPrompt(f"Please give a concise phrase to describe the main research topic within the field of mental health that unifies the following words and indicates the mental health relevance: {keywords}. Please return only the word or phrase with no explanation. Topic: ")
         except Exception as e:  # Keep the pipeline running even if naming fails?
             print(f"  LLM naming failed for topic {topic_id} ({e})")
         results[topic_id] = (name, keywords)
@@ -497,9 +495,8 @@ def build_monthly_mentions(paper_topic_matrix):
 #     guaranteed to end on a complete month, and this windowing can use
 #     all of it rather than quietly discarding one more.
 #   - TRENDY FLAG: the paper's rule (actual > predicted in >=
-#     TREND_N_MONTHS of the last TREND_M_MONTHS) AND-ed with two extra
-#     gates -- a recency check (>= TREND_RECENT_N_MONTHS of the last
-#     TREND_RECENT_M_MONTHS) and a positive OLS slope of actual over the
+#     TREND_N_MONTHS of the last TREND_M_MONTHS) AND-ed with 
+#     a positive OLS slope of actual over the
 #     last TREND_M_MONTHS. See _trend_rank_and_flag().
 #   - RankSum is computed for every topic,
 #     weighting each of the last TREND_M_MONTHS months by
@@ -524,18 +521,15 @@ def make_windows(values, look_back):
 
 
 def _trend_rank_and_flag(actual_tail, predicted_tail, mean_actual, n=TREND_N_MONTHS, m=TREND_M_MONTHS,
-                          recent_n=TREND_RECENT_N_MONTHS, recent_m=TREND_RECENT_M_MONTHS,
                           min_slope=TREND_MIN_SLOPE, size_norm_exponent=TREND_SIZE_NORM_EXPONENT):
     """Trendiness scoring, extending the original paper's rule. A topic is
-    flagged trendy only if ALL of:
+    flagged trendy only if both:
       1. actual > predicted in >= n of the last m months (the paper's rule);
-      2. actual > predicted in >= recent_n of the last recent_m months, so
-         the outperformance is still current rather than fading;
-      3. the ordinary-least-squares slope of actual over the last m months
+      2. the ordinary-least-squares slope of actual over the last m months
          is > min_slope, so the counts are genuinely rising and not merely
          sitting above an under-shooting prediction.
 
-    RankSum is unchanged and still returned for every topic regardless of
+    RankSum returned for every topic regardless of
     the flag: it sums the positive monthly excesses (actual - predicted),
     each weighted by e^(1/(m-i)) (i=0 oldest of the m, i=m-1 most recent),
     divided by `max(mean_actual, 1) ** size_norm_exponent`. The original
@@ -545,16 +539,13 @@ def _trend_rank_and_flag(actual_tail, predicted_tail, mean_actual, n=TREND_N_MON
     noise alone. 0.5 divides by the Poisson standard deviation instead
     (~size-neutral under the null); 0.0 disables it."""
     exceed_count = sum(1 for a, p in zip(actual_tail, predicted_tail) if a > p)
-    recent_exceed = sum(
-        1 for a, p in zip(actual_tail[-recent_m:], predicted_tail[-recent_m:]) if a > p
-    )
     if len(actual_tail) >= 2:
         xs = np.arange(len(actual_tail), dtype=float)
         slope = float(np.polyfit(xs, np.asarray(actual_tail, dtype=float), 1)[0])
     else:
         slope = 0.0
 
-    trendy = exceed_count >= n and recent_exceed >= recent_n and slope > min_slope
+    trendy = exceed_count >= n and slope > min_slope
 
     terms = [
         0.0 if a < p else float((a - p) * math.exp(1 / (m - i)))
