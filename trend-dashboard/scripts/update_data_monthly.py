@@ -51,8 +51,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")      # DeepInfra token (used w
 ASSIGNMENT_THRESHOLD = 0.08     # per the paper's methodology
 SLIDING_WINDOW_MONTHS = 6       # per the paper's methodology
 TREND_N_MONTHS = 4              # of the last...
-TREND_M_MONTHS = 6               # ...months, actual must exceed predicted (the paper's rule) -- AND:
-TREND_MIN_SLOPE = 0.0         # AND the OLS slope of actual over the last TREND_M_MONTHS must exceed this
+TREND_M_MONTHS = 6               # ...months, actual must exceed predicted to count as trendy
 TREND_HIDDEN_SIZE = 10          # GRU hidden units (both stacked layers)
 TREND_EPOCHS = 10
 TREND_BATCH_SIZE = 32
@@ -494,8 +493,15 @@ def build_monthly_mentions(paper_topic_matrix):
 #     before it ever reaches this function) -- so `series` is already
 #     guaranteed to end on a complete month, and this windowing can use
 #     all of it rather than quietly discarding one more.
-#   - TRENDY FLAG: the paper's rule (actual > predicted in >=
-#     TREND_N_MONTHS of the last TREND_M_MONTHS) See _trend_rank_and_flag().
+#   - TRENDY FLAG: the paper's rule -- actual > predicted in >=
+#     TREND_N_MONTHS of the last TREND_M_MONTHS. See _trend_rank_and_flag().
+#   - NON-NEGATIVE PREDICTIONS: the GRU's output head and the inverse
+#     MinMax transform are both unconstrained affine maps, so a predicted
+#     mention count can come out negative (typically for a near-flat,
+#     near-zero series read through a scale fit on other, larger topics).
+#     Both train_one_model() and predict_topic() clip predictions to >= 0
+#     before they're used anywhere -- ModelMAE, Pred_M*, and the Trendy/
+#     RankSum comparison below all see only non-negative predictions.
 #   - RankSum is computed for every topic,
 #     weighting each of the last TREND_M_MONTHS months by
 #     e^(1/(TREND_M_MONTHS - i)) -- i.e. putting more weight on the most
@@ -629,7 +635,14 @@ def fit_trend_model(monthly_mentions_df, window=SLIDING_WINDOW_MONTHS, epochs=TR
         model.eval()
         with torch.no_grad():
             pred_scaled = model(X_t).cpu().numpy()
-        pred_actual = scaler.inverse_transform(pred_scaled)
+        # The GRU's output head and the inverse MinMax transform are both
+        # unconstrained affine maps, so a predicted mention count can come
+        # out negative (typically for a near-flat, near-zero series read
+        # through a scale fit on other, larger topics). Mentions can't be
+        # negative, so clip -- this keeps MAE from being inflated by an
+        # impossible prediction, and predict_topic() below applies the same
+        # clip before Pred_M/Trendy/RankSum ever see these values.
+        pred_actual = np.clip(scaler.inverse_transform(pred_scaled), 0.0, None)
         y_actual = scaler.inverse_transform(y_t.cpu().numpy())
         mae = float(np.mean(np.abs(pred_actual - y_actual)))
         return model, scaler, mae
@@ -647,7 +660,9 @@ def fit_trend_model(monthly_mentions_df, window=SLIDING_WINDOW_MONTHS, epochs=TR
         model.eval()
         with torch.no_grad():
             pred_scaled = model(X_test_t).cpu().numpy()
-        y_pred = scaler.inverse_transform(pred_scaled).flatten()
+        # See the matching clip + comment in train_one_model() above: a
+        # predicted mention count is never allowed to be negative.
+        y_pred = np.clip(scaler.inverse_transform(pred_scaled).flatten(), 0.0, None)
         y_actual = scaler.inverse_transform(np.array(y_test).reshape(-1, 1)).flatten()
         return y_actual, y_pred
 
