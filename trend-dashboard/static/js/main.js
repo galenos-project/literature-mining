@@ -12,6 +12,32 @@
     return out;
   }
 
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => (
+      { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+    ));
+  }
+
+  // Escape `text`, then wrap the first case-insensitive occurrence of
+  // `query` in <mark>. Slices the raw string first so the <mark> tags are
+  // never themselves escaped.
+  function highlightMatch(text, query) {
+    const i = query ? text.toLowerCase().indexOf(query.toLowerCase()) : -1;
+    if (i < 0) return escapeHtml(text);
+    return (
+      escapeHtml(text.slice(0, i)) +
+      "<mark>" + escapeHtml(text.slice(i, i + query.length)) + "</mark>" +
+      escapeHtml(text.slice(i + query.length))
+    );
+  }
+
+  function matchingKeywords(topic, query, max) {
+    const q = query.toLowerCase();
+    return (topic.keywords || [])
+      .filter((k) => k.toLowerCase().includes(q))
+      .slice(0, max || 6);
+  }
+
   function monthToParts(monthStr) {
     // monthStr like '2023-04-01'
     const [y, m] = monthStr.split("-");
@@ -31,8 +57,8 @@
         paper_bgcolor: "rgba(0,0,0,0)",
         plot_bgcolor: "rgba(0,0,0,0)",
         legend: { orientation: "h", y: -0.2 },
-        xaxis: { gridcolor: "#EFEBDE", zeroline: false },
-        yaxis: { gridcolor: "#EFEBDE", zeroline: false, rangemode: "tozero" },
+        xaxis: { gridcolor: "#E8EAED", zeroline: false },
+        yaxis: { gridcolor: "#E8EAED", zeroline: false, rangemode: "tozero" },
         hovermode: "closest",
       },
       overrides || {}
@@ -55,6 +81,7 @@
       .then((topics) => {
         allTopics = topics;
         populateTopicSelect(topics);
+        initTopicSearch();
         renderTrendChart();
         const first = window.GALENOS.defaultTopicIds[0] || (topics[0] && topics[0].topic_id);
         if (first != null) {
@@ -97,6 +124,128 @@
       });
     }
 
+    // Free-text topic search: filters the already-loaded `allTopics` by
+    // name OR keyword and shows a dropdown of matches. Picking one drives
+    // the "Explore a topic" chart below (keeps the search in context).
+    function initTopicSearch() {
+      const input = document.getElementById("topic-search");
+      const results = document.getElementById("topic-search-results");
+      if (!input || !results) return;
+      const select = document.getElementById("topic-select");
+      let matches = [];
+      let activeIndex = -1;
+
+      function query() {
+        return input.value.trim();
+      }
+
+      function search(q) {
+        const needle = q.toLowerCase();
+        return allTopics
+          .filter(
+            (t) =>
+              (t.name || "").toLowerCase().includes(needle) ||
+              (t.keywords || []).some((k) => k.toLowerCase().includes(needle))
+          )
+          .slice(0, 25);
+      }
+
+      function close() {
+        results.hidden = true;
+        input.setAttribute("aria-expanded", "false");
+        activeIndex = -1;
+      }
+
+      function render() {
+        const q = query();
+        results.innerHTML = "";
+        activeIndex = -1;
+        if (!q) return close();
+
+        if (!matches.length) {
+          const li = document.createElement("li");
+          li.className = "topic-search__empty";
+          li.textContent = "No topics match \u201C" + q + "\u201D";
+          results.appendChild(li);
+        } else {
+          matches.forEach((t) => {
+            const li = document.createElement("li");
+            li.setAttribute("role", "option");
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "topic-search__result";
+            const kws = matchingKeywords(t, q);
+            btn.innerHTML =
+              (t.is_trendy ? "\u25B2 " : "") +
+              highlightMatch(t.name || "(unnamed topic)", q) +
+              (kws.length
+                ? '<span class="topic-search__result-kw">' +
+                  kws.map((k) => highlightMatch(k, q)).join(", ") +
+                  "</span>"
+                : "");
+            btn.addEventListener("click", () => choose(t));
+            li.appendChild(btn);
+            results.appendChild(li);
+          });
+        }
+        results.hidden = false;
+        input.setAttribute("aria-expanded", "true");
+      }
+
+      function choose(topic) {
+        if (![...select.options].some((o) => o.value === String(topic.topic_id))) {
+          const opt = document.createElement("option");
+          opt.value = topic.topic_id;
+          opt.textContent = (topic.is_trendy ? "\u25B2 " : "") + topic.name;
+          select.appendChild(opt);
+        }
+        select.value = topic.topic_id;
+        renderTopicChart(topic.topic_id);
+        input.value = "";
+        matches = [];
+        close();
+        document
+          .getElementById("topic-chart")
+          .scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
+
+      function moveActive(delta) {
+        const items = [...results.querySelectorAll(".topic-search__result")];
+        if (!items.length) return;
+        activeIndex = (activeIndex + delta + items.length) % items.length;
+        items.forEach((it, i) => it.classList.toggle("is-active", i === activeIndex));
+        items[activeIndex].scrollIntoView({ block: "nearest" });
+      }
+
+      input.addEventListener("input", () => {
+        matches = query() ? search(query()) : [];
+        render();
+      });
+
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          moveActive(1);
+        } else if (e.key === "ArrowUp") {
+          e.preventDefault();
+          moveActive(-1);
+        } else if (e.key === "Enter") {
+          if (matches.length) {
+            e.preventDefault();
+            choose(matches[activeIndex >= 0 ? activeIndex : 0]);
+          }
+        } else if (e.key === "Escape") {
+          input.value = "";
+          matches = [];
+          close();
+        }
+      });
+
+      document.addEventListener("click", (e) => {
+        if (!e.target.closest(".topic-search")) close();
+      });
+    }
+
     function topicIdsForTrendChart() {
       const count = trendTopicCount;
       if (trendSortMode === "size") {
@@ -136,7 +285,7 @@
         Plotly.newPlot(
           "trend-chart",
           traces,
-          baseLayout({ yaxis: { title: "Mentions / month", gridcolor: "#EFEBDE", rangemode: "tozero" } }),
+          baseLayout({ yaxis: { title: "Mentions / month", gridcolor: "#E8EAED", rangemode: "tozero" } }),
           PLOTLY_CONFIG
         );
 
@@ -164,7 +313,7 @@
           customdata: greyPoints.map((p) => p.topic_id),
           mode: "markers",
           name: "Established",
-          marker: { size: 7, color: "#B9B4A5", opacity: 0.65, line: { width: 0.5, color: "#FAF9F4" } },
+          marker: { size: 7, color: "#B7BBC2", opacity: 0.65, line: { width: 0.5, color: "#F3F4F6" } },
           hovertemplate: "%{text}<extra></extra>",
         });
       }
@@ -183,7 +332,7 @@
             size: 9,
             color: LINE_PALETTE[i % LINE_PALETTE.length],
             opacity: 0.9,
-            line: { width: 0.6, color: "#FAF9F4" },
+            line: { width: 0.6, color: "#F3F4F6" },
           },
           hovertemplate: "%{text}<extra></extra>",
         });
@@ -229,7 +378,7 @@
           Plotly.newPlot(
             "topic-chart",
             [actual, predicted],
-            baseLayout({ yaxis: { title: "Mentions / month", gridcolor: "#EFEBDE", rangemode: "tozero" } }),
+            baseLayout({ yaxis: { title: "Mentions / month", gridcolor: "#E8EAED", rangemode: "tozero" } }),
             PLOTLY_CONFIG
           );
 
@@ -279,7 +428,7 @@
     Plotly.newPlot(
       "topic-detail-chart",
       [actual, predicted],
-      baseLayout({ yaxis: { title: "Mentions / month", gridcolor: "#EFEBDE", rangemode: "tozero" } }),
+      baseLayout({ yaxis: { title: "Mentions / month", gridcolor: "#E8EAED", rangemode: "tozero" } }),
       PLOTLY_CONFIG
     );
 

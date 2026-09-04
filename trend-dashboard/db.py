@@ -31,8 +31,10 @@ def list_topics(db, q=None, trendy_only=False, limit=None):
     sql = "SELECT topic_id, name, keywords, n_papers, is_trendy, trend_rank, trend_mae FROM topics"
     clauses, params = [], []
     if q:
-        clauses.append("name LIKE ?")
-        params.append(f"%{q}%")
+        # keywords is a JSON array stored as text, so a substring LIKE on it
+        # matches individual keywords well enough for a free-text search.
+        clauses.append("(name LIKE ? OR keywords LIKE ?)")
+        params.extend([f"%{q}%", f"%{q}%"])
     if trendy_only:
         clauses.append("is_trendy = 1")
     if clauses:
@@ -102,15 +104,24 @@ def get_corpus_stats(db):
     n_topics = db.execute("SELECT COUNT(*) AS c FROM topics").fetchone()["c"]
     n_trendy = db.execute("SELECT COUNT(*) AS c FROM topics WHERE is_trendy = 1").fetchone()["c"]
     n_papers = db.execute("SELECT COUNT(*) AS c FROM papers").fetchone()["c"]
-    date_range = db.execute(
-        "SELECT MIN(publication_date) AS lo, MAX(publication_date) AS hi FROM papers"
+    # Corpus window: the span of complete months in monthly_counts. The
+    # aggregated series already has the in-progress current month dropped
+    # (see build_monthly_mentions in the pipeline), so month_hi is the last
+    # month the dashboard actually has full data for. Fall back to raw
+    # paper dates if no monthly data has been loaded yet.
+    span = db.execute(
+        "SELECT MIN(month) AS lo, MAX(month) AS hi FROM monthly_counts"
     ).fetchone()
+    if span["lo"] is None:
+        span = db.execute(
+            "SELECT MIN(publication_date) AS lo, MAX(publication_date) AS hi FROM papers"
+        ).fetchone()
     return {
         "n_topics": n_topics,
         "n_trendy": n_trendy,
         "n_papers": n_papers,
-        "date_lo": date_range["lo"],
-        "date_hi": date_range["hi"],
+        "month_lo": span["lo"],
+        "month_hi": span["hi"],
     }
 
 

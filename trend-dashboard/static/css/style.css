@@ -1,18 +1,19 @@
 /* ---------------------------------------------------------------------
    GALENOS Trends — design tokens
-   Palette: warm paper background, ink navy text, teal for "actual" data,
-   amber for "predicted" data, brick red reserved for trendiness signals.
+   Palette: cool light-grey background, ink navy text, teal for "actual"
+   data, amber for "predicted" data, brick red reserved for trendiness
+   signals.
    Type: Source Serif 4 (masthead/headings), Inter (UI/body), IBM Plex Mono
    (counts, dates, keyword chips).
 --------------------------------------------------------------------- */
 
 :root {
-  --paper: #FAF9F4;
+  --paper: #F3F4F6;
   --paper-raised: #FFFFFF;
   --ink: #1B2233;
   --ink-soft: #3D4457;
   --muted: #6B7280;
-  --line: #DDD8C9;
+  --line: #E1E4E8;
   --teal: #2B6E68;
   --teal-soft: #E4EEEC;
   --amber: #D98A3D;
@@ -124,7 +125,8 @@ a:focus-visible, select:focus-visible, button:focus-visible {
 
 .stats-strip {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  /* last column (corpus window) is double-width to fit the YYYY-MM range */
+  grid-template-columns: 1fr 1fr 1fr 2fr;
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
   margin-bottom: 1.75rem;
@@ -193,7 +195,8 @@ a:focus-visible, select:focus-visible, button:focus-visible {
   align-items: center;
   gap: 0.35rem;
 }
-.ticker__item:hover { color: var(--trend); text-decoration: none; }
+.ticker__item { cursor: pointer; }
+.ticker__item:hover { color: var(--trend); text-decoration: underline; }
 
 .ticker__arrow { color: var(--trend); font-size: 0.65rem; }
 
@@ -324,6 +327,85 @@ a:focus-visible, select:focus-visible, button:focus-visible {
   border-radius: var(--radius);
   background: var(--paper);
   min-width: 260px;
+}
+
+/* ---- Topic search ---------------------------------------------------*/
+
+.topic-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  flex-shrink: 0;
+}
+
+.topic-search { position: relative; }
+
+.topic-search__input {
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  color: var(--ink);
+  width: 260px;
+  max-width: 100%;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper-raised);
+}
+
+.topic-search__results {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 0.25rem;
+  list-style: none;
+  max-height: 340px;
+  overflow-y: auto;
+  background: var(--paper-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgba(27, 34, 51, 0.12);
+}
+
+.topic-search__result {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  color: var(--ink);
+  background: none;
+  border: none;
+  border-radius: var(--radius);
+  padding: 0.45rem 0.55rem;
+  cursor: pointer;
+}
+.topic-search__result:hover,
+.topic-search__result.is-active {
+  background: var(--teal-soft);
+}
+.topic-search__result mark {
+  background: var(--trend-soft);
+  color: var(--trend);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.topic-search__result-kw {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-top: 0.15rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.topic-search__empty {
+  padding: 0.5rem 0.55rem;
+  color: var(--muted);
+  font-size: 0.83rem;
 }
 
 .keyword-chips {

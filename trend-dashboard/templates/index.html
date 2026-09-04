@@ -15,7 +15,7 @@
     <span class="stat__label">trending now</span>
   </div>
   <div class="stat">
-    <span class="stat__value">{{ stats.date_lo[:4] if stats.date_lo else "&ndash;" }}&ndash;{{ stats.date_hi[:4] if stats.date_hi else "&ndash;" }}</span>
+    <span class="stat__value">{{ stats.month_lo[:7] if stats.month_lo else "&ndash;" }} &ndash; {{ stats.month_hi[:7] if stats.month_hi else "&ndash;" }}</span>
     <span class="stat__label">corpus window</span>
   </div>
 </section>
@@ -63,10 +63,20 @@
       <h2>Explore a topic</h2>
       <p class="panel__hint">Blue = actual mentions, amber = model-predicted mentions. Click any month to read the papers.</p>
     </div>
-    <label class="topic-select">
-      <span>Topic</span>
-      <select id="topic-select"></select>
-    </label>
+    <div class="topic-picker">
+      <div class="topic-search">
+        <input type="search" id="topic-search" class="topic-search__input"
+               placeholder="Search topics by name or keyword&hellip;" autocomplete="off"
+               role="combobox" aria-expanded="false" aria-autocomplete="list"
+               aria-controls="topic-search-results"
+               aria-label="Search topics by name or keyword">
+        <ul id="topic-search-results" class="topic-search__results" role="listbox" hidden></ul>
+      </div>
+      <label class="topic-select">
+        <span>Topic</span>
+        <select id="topic-select"></select>
+      </label>
+    </div>
   </div>
   <div id="topic-chart" class="chart chart--tall"></div>
   <div id="topic-keywords" class="keyword-chips"></div>
