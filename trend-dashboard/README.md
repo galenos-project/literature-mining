@@ -74,20 +74,23 @@ file at a time as your pipeline output changes.
 ### The paper-landscape scatter plot
 
 No embeddings were saved by the original pipeline, so this dashboard
-computes its own local, lightweight stand-in: `scripts/compute_embeddings.py`
-samples ~5 papers per topic, fits a single shared TF-IDF + TruncatedSVD
-(LSA) projection across all of them (so every topic's points land in the
-same comparable 2D space), and stores the result in `topic_paper_samples`.
-This deliberately avoids downloading a transformer model — it's pure
-scikit-learn and runs in seconds even for ~1000 topics. If you'd rather use
-real sentence embeddings later, swap out `embed_texts()` in that script for
-a sentence-transformers call; everything downstream (sampling, storage, the
-scatter plot itself) stays the same.
+computes its own: `scripts/compute_embeddings.py` samples ~5 papers per
+topic, embeds each paper's title + abstract with the `all-MiniLM-L6-v2`
+sentence-transformer, projects those to 2D with UMAP (one shared
+projection, so every topic's points land in the same comparable space),
+and stores the result in `topic_paper_samples`. The first run downloads
+the ~90 MB model; embedding a few thousand papers on CPU takes a couple
+of minutes.
+
+How tightly a topic's papers group in the plot is controlled by the UMAP
+parameters, exposed as flags: `--n-neighbors` (lower ⇒ tighter, more
+separated clusters), `--min-dist` (near 0.0 ⇒ dense clumps), `--metric`,
+plus `--samples-per-topic` and `--seed`.
 
 Run it any time after `--papers` and `--paper-topics` have been loaded:
 
 ```bash
-python scripts/compute_embeddings.py --samples-per-topic 5
+python scripts/compute_embeddings.py --samples-per-topic 15 --n-neighbors 10 --min-dist 0.0
 ```
 
 It's independent of the other import steps and safe to re-run (it clears
