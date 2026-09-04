@@ -495,9 +495,7 @@ def build_monthly_mentions(paper_topic_matrix):
 #     guaranteed to end on a complete month, and this windowing can use
 #     all of it rather than quietly discarding one more.
 #   - TRENDY FLAG: the paper's rule (actual > predicted in >=
-#     TREND_N_MONTHS of the last TREND_M_MONTHS) AND-ed with 
-#     a positive OLS slope of actual over the
-#     last TREND_M_MONTHS. See _trend_rank_and_flag().
+#     TREND_N_MONTHS of the last TREND_M_MONTHS) See _trend_rank_and_flag().
 #   - RankSum is computed for every topic,
 #     weighting each of the last TREND_M_MONTHS months by
 #     e^(1/(TREND_M_MONTHS - i)) -- i.e. putting more weight on the most
@@ -520,14 +518,9 @@ def make_windows(values, look_back):
     return X, y
 
 
-def _trend_rank_and_flag(actual_tail, predicted_tail, mean_actual, n=TREND_N_MONTHS, m=TREND_M_MONTHS,
-                          min_slope=TREND_MIN_SLOPE, size_norm_exponent=TREND_SIZE_NORM_EXPONENT):
-    """Trendiness scoring, extending the original paper's rule. A topic is
-    flagged trendy only if both:
-      1. actual > predicted in >= n of the last m months (the paper's rule);
-      2. the ordinary-least-squares slope of actual over the last m months
-         is > min_slope, so the counts are genuinely rising and not merely
-         sitting above an under-shooting prediction.
+def _trend_rank_and_flag(actual_tail, predicted_tail, mean_actual, n=TREND_N_MONTHS, m=TREND_M_MONTHS,size_norm_exponent=TREND_SIZE_NORM_EXPONENT):
+    """Trendiness scoring.  A topic is
+    flagged trendy only if actual > predicted in >= n of the last m months. 
 
     RankSum returned for every topic regardless of
     the flag: it sums the positive monthly excesses (actual - predicted),
@@ -539,13 +532,8 @@ def _trend_rank_and_flag(actual_tail, predicted_tail, mean_actual, n=TREND_N_MON
     noise alone. 0.5 divides by the Poisson standard deviation instead
     (~size-neutral under the null); 0.0 disables it."""
     exceed_count = sum(1 for a, p in zip(actual_tail, predicted_tail) if a > p)
-    if len(actual_tail) >= 2:
-        xs = np.arange(len(actual_tail), dtype=float)
-        slope = float(np.polyfit(xs, np.asarray(actual_tail, dtype=float), 1)[0])
-    else:
-        slope = 0.0
 
-    trendy = exceed_count >= n and slope > min_slope
+    trendy = exceed_count >= n
 
     terms = [
         0.0 if a < p else float((a - p) * math.exp(1 / (m - i)))
