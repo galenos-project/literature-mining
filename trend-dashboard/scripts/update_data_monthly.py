@@ -56,6 +56,8 @@ TREND_HIDDEN_SIZE = 10          # GRU hidden units (both stacked layers)
 TREND_EPOCHS = 10
 TREND_BATCH_SIZE = 32
 TREND_LEAVE_K_OUT = 10         # topics held out (and predicted) per training run; 1 == exact leave-one-topic-out
+TREND_SIZE_NORM_EXPONENT = 0.5 # RankSum denominator is mean_actual ** this. 1.0 = original (÷mean, biased
+                               # toward small/noisy topics); 0.5 = ÷Poisson SD, ~size-neutral; 0.0 = no size norm
 
 
 # ==========================================================================
@@ -494,7 +496,11 @@ def build_monthly_mentions(paper_topic_matrix):
 #   - RankSum is computed for every topic,
 #     weighting each of the last TREND_M_MONTHS months by
 #     e^(1/(TREND_M_MONTHS - i)) -- i.e. putting more weight on the most
-#     recent months, not a smooth decay.
+#     recent months, not a smooth decay. The weighted excess is then
+#     divided by mean_actual ** TREND_SIZE_NORM_EXPONENT; the original
+#     paper used exponent 1.0 (plain mean), 0.5 (Poisson SD) removes the
+#     resulting bias toward small, naturally-noisier topics -- see
+#     _trend_rank_and_flag().
 # ==========================================================================
 
 def make_windows(values, look_back):
@@ -509,18 +515,28 @@ def make_windows(values, look_back):
     return X, y
 
 
-def _trend_rank_and_flag(actual_tail, predicted_tail, mean_actual, n=TREND_N_MONTHS, m=TREND_M_MONTHS):
-    """Exact reproduction of the original's trendiness scoring: trendy if
-    actual exceeded predicted in >= n of the last m months; RankSum uses an
-    e^(1/(m-i)) weight per month (i=0 is the oldest of the m, i=m-1 the
-    most recent), computed regardless of the Trendy flag."""
+def _trend_rank_and_flag(actual_tail, predicted_tail, mean_actual, n=TREND_N_MONTHS, m=TREND_M_MONTHS,
+                          size_norm_exponent=TREND_SIZE_NORM_EXPONENT):
+    """Trendiness scoring, following the original paper: trendy if actual
+    exceeded predicted in >= n of the last m months; RankSum sums the
+    positive monthly excesses (actual - predicted), each weighted by
+    e^(1/(m-i)) (i=0 oldest of the m, i=m-1 most recent), computed
+    regardless of the Trendy flag.
+
+    The excess sum is then divided by `max(mean_actual, 1) ** size_norm_exponent`.
+    The original used the plain mean (exponent 1.0), which over-normalizes:
+    monthly counts are ~Poisson, so their noise scales as sqrt(mean), and
+    dividing an absolute excess by the mean leaves small topics with an
+    inflated score from noise alone. Exponent 0.5 divides by the Poisson
+    standard deviation instead, which is roughly size-neutral under the
+    null; 0.0 disables size normalization entirely."""
     exceed_count = sum(1 for a, p in zip(actual_tail, predicted_tail) if a > p)
     trendy = exceed_count >= n
     terms = [
         0.0 if a < p else float((a - p) * math.exp(1 / (m - i)))
         for i, (a, p) in enumerate(zip(actual_tail, predicted_tail))
     ]
-    rank_sum = sum(terms) / (mean_actual if mean_actual > 1 else 1)
+    rank_sum = sum(terms) / (max(mean_actual, 1.0) ** size_norm_exponent)
     return trendy, rank_sum
 
 
