@@ -4,6 +4,7 @@ Expected files (columns exactly as produced by the literature-mining pipeline):
 
   --papers PAPERS.csv
       PaperId,PaperTitle,Citations,coFoS,Authors,Abstract,Lang,PubYear,PubDate
+      (or CitedByCount in place of Citations, as update_data_monthly.py writes)
 
   --topics TOPICS.csv
       Topic,Name,Words
@@ -107,12 +108,16 @@ def parse_int(raw):
     return int(float(raw))  # tolerate "12.0"-style ints
 
 
-def parse_citation_count(raw):
-    """The Citations column holds a '|'-delimited list of the IDs of papers
-    that cite this one (e.g. '1972772384|1983609344|...'), not a plain
-    count — so the citation count is the number of IDs listed, including
-    the single-ID and empty (0 citations) cases."""
-    raw = (raw or "").strip()
+def parse_citation_count(row):
+    """update_data_monthly.py writes OpenAlex's cited_by_count as a plain
+    CitedByCount column. The notebooks' Citations column instead holds a
+    '|'-delimited list of the IDs of papers that cite this one (e.g.
+    '1972772384|1983609344|...'), so there the citation count is the number
+    of IDs listed, including the single-ID and empty (0 citations) cases."""
+    cited_by = parse_int(row.get("CitedByCount"))
+    if cited_by is not None:
+        return cited_by
+    raw = (row.get("Citations") or "").strip()
     if not raw:
         return 0
     return len([p for p in raw.split("|") if p.strip()])
@@ -184,13 +189,13 @@ def load_topics(conn, path):
         for row in reader:
             topic_id = parse_int(row["Topic"])
             conn.execute(
-                "INSERT OR REPLACE INTO topics (topic_id, name, keywords, n_papers, is_trendy, trend_rank, trend_mae) "
+                "INSERT OR REPLACE INTO topics (topic_id, name, keywords, n_papers, is_trendy, trend_rank, trend_mae, lineage_id) "
                 "VALUES (?, ?, ?, COALESCE((SELECT n_papers FROM topics WHERE topic_id = ?), 0), "
                 "        COALESCE((SELECT is_trendy FROM topics WHERE topic_id = ?), 0), "
                 "        (SELECT trend_rank FROM topics WHERE topic_id = ?), "
-                "        (SELECT trend_mae FROM topics WHERE topic_id = ?))",
+                "        (SELECT trend_mae FROM topics WHERE topic_id = ?), ?)",
                 (topic_id, row["Name"], json.dumps(parse_words(row.get("Words"))),
-                 topic_id, topic_id, topic_id, topic_id),
+                 topic_id, topic_id, topic_id, topic_id, parse_int(row.get("LineageId"))),
             )
     print(f"  topics loaded from {path}")
 
@@ -289,12 +294,40 @@ def _insert_paper_row(conn, row):
             row.get("Abstract"),
             row.get("Authors"),
             pub_date,
-            parse_citation_count(row.get("Citations")),
+            parse_citation_count(row),
             row.get("coFoS"),
             row.get("Lang"),
             guess_openalex_url(paper_id),
         ),
     )
+
+
+def load_history(conn, history_dir):
+    """Load every archived run under history_dir (<YYYY-MM>/topics.csv, as
+    written by update_data_monthly.archive_run) into topic_history."""
+    runs = sorted(d for d in os.listdir(history_dir)
+                  if re.match(r"^\d{4}-\d{2}$", d) and os.path.exists(os.path.join(history_dir, d, "topics.csv")))
+    n_rows = 0
+    for run_month in runs:
+        with open(os.path.join(history_dir, run_month, "topics.csv"), newline="", encoding="utf-8-sig") as f:
+            rows = list(csv.DictReader(f))
+        trendy = sorted((r for r in rows if parse_bool(r.get("Trendy"))),
+                        key=lambda r: -(parse_float(r.get("RankSum")) or 0))
+        position = {r["Topic"]: i + 1 for i, r in enumerate(trendy)}
+        for r in rows:
+            matched = parse_bool(r.get("Matched"))
+            conn.execute(
+                "INSERT OR REPLACE INTO topic_history (lineage_id, run_month, topic_id, name, keywords, n_papers, "
+                "is_trendy, trend_rank, trendy_position, keyword_overlap, paper_overlap) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (parse_int(r["LineageId"]), run_month, parse_int(r["Topic"]), r["Name"],
+                 json.dumps(parse_words(r.get("Words"))), parse_int(r.get("NPapers")),
+                 int(parse_bool(r.get("Trendy"))), parse_float(r.get("RankSum")), position.get(r["Topic"]),
+                 parse_int(r.get("KeywordOverlap")) if matched else None,
+                 parse_float(r.get("PaperOverlap")) if matched else None),
+            )
+            n_rows += 1
+    print(f"  topic history loaded from {history_dir} ({len(runs)} runs, {n_rows} rows)")
 
 
 def load_papers(conn, path):
@@ -336,6 +369,8 @@ def main():
     parser.add_argument("--monthly", help="wide monthly mentions CSV: PubDate,Topic0,Topic1,...")
     parser.add_argument("--predictions", help="trendy predictions CSV: Topic,TopicName,Trendy,RankSum,ModelMAE,Pred_M0..Pred_MN")
     parser.add_argument("--paper-topics", dest="paper_topics", help="binary paper-topic assignment CSV")
+    parser.add_argument("--history-dir", dest="history_dir",
+                        help="update_data_monthly.py's history/ folder of archived runs (<YYYY-MM>/topics.csv)")
     args = parser.parse_args()
 
     conn = sqlite3.connect(DB_PATH)
@@ -362,6 +397,9 @@ def main():
 
     if args.paper_topics:
         load_paper_topics(conn, args.paper_topics, populate_papers=not args.papers)
+
+    if args.history_dir:
+        load_history(conn, args.history_dir)
 
     conn.commit()
     conn.close()

@@ -37,17 +37,19 @@ runnable and demoable before you wire in real pipeline output.
 ## Wiring in real data
 
 The app reads from a single SQLite database (`data/galenos.db`) defined by
-`schema.sql`. Four tables — `topics`, `monthly_counts`, `papers`,
-`paper_topics` — populated from **five source files** by
+`schema.sql`. Five tables — `topics`, `monthly_counts`, `papers`,
+`paper_topics`, `topic_history` — populated from **five source files** (plus
+the pipeline's history archive) by
 `scripts/import_notebook_outputs.py`:
 
 | flag               | file columns                                                                 | populates                                                                            |
 | ------------------ | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `--topics`       | `Topic,Name,Words`                                                         | `topics` (id, name, keywords)                                                      |
+| `--topics`       | `Topic,Name,Words` (optionally `LineageId,...`, as the pipeline writes)    | `topics` (id, name, keywords, lineage)                                             |
 | `--monthly`      | `PubDate,Topic0,Topic1,...` (wide, one row per month)                      | `monthly_counts.actual_count`, and `topics.n_papers`                             |
 | `--predictions`  | `,Topic,TopicName,Trendy,RankSum,ModelMAE,Pred_M0,...,Pred_M115`           | `monthly_counts.predicted_count`, `topics.is_trendy/trend_rank/trend_mae`        |
 | `--papers`       | `PaperId,PaperTitle,Citations,coFoS,Authors,Abstract,Lang,PubYear,PubDate` | `papers`                                                                           |
 | `--paper-topics` | same columns as`--papers`, plus binary `Topic0,Topic1,...`               | `paper_topics` (probability fixed at 1.0, since the source is already thresholded) |
+| `--history-dir`  | the pipeline's `history/` folder of archived runs (see below)              | `topic_history` (the topic page's History panel)                                   |
 
 ```bash
 python scripts/init_db.py --reset
@@ -100,29 +102,59 @@ underlying papers/topic assignments change.
 ## Monthly batch updates
 
 `scripts/update_data_monthly.py` runs the full pipeline in one command,
-instead of the notebooks by hand: fetch new OpenAlex papers → refit the
+instead of the notebooks by hand: refetch the corpus from OpenAlex → refit the
 topic model on the full corpus → name topics → build the binary
 paper-topic matrix → rebuild monthly mentions → retrain the trend model →
 reload the live database.
 
 ```bash
 pip install -r requirements-pipeline.txt   
-export OPENALEX_MAILTO="you@example.org"   
-export OPENAI_API_KEY="..."         
+# keys go in trend-dashboard/.env (gitignored; already-exported variables win):
+#   OPENALEX_API_KEY=...  OPENALEX_MAILTO=you@example.org  OPENAI_API_KEY=...
 
 python scripts/update_data_monthly.py --data-dir pipeline_data
 ```
 
 `pipeline_data/` holds the pipeline's own working CSVs (its record of the
 full corpus, topics, etc. across runs) — separate from anything you import
-manually via `import_notebook_outputs.py`. Re-running the command each
-month fetches only papers published since the newest one already on file,
+manually via `import_notebook_outputs.py`. The corpus is a rolling window
+of the 120 complete calendar months before the current one (e.g. a run in
+October 2026 covers 2016-10-01 to 2026-09-30). Each run refetches that whole
+window rather than only newly published papers, because OpenAlex keeps
+adding papers to past months and updating existing records; papers that
+have rolled out of the window are dropped. The refetch goes to
+`pipeline_data/papers_fetching.csv` and only replaces `papers.csv` once
+complete (an interrupted run resumes from it automatically), and it's
+refused if the corpus would shrink by more than 5%. The run then
 refits everything, and does a full `init_db.py --reset` + reimport +
 `compute_embeddings.py` (topic ids aren't stable across a full-corpus
 refit, so this is a full rebuild each run, not an incremental patch).
 
-Useful flags: `--since YYYY-MM-DD` to override the auto-detected fetch
-start date, `--skip-fetch` to re-run modelling on the existing corpus only
+### Topic history
+
+Topic ids are re-derived on every refit, so continuity between monthly
+runs is tracked separately. After the topic model is refit, each new topic
+is compared with the previous run's topics: it *continues* one if at
+least 10 of their 15 keywords are shared and the shared papers (counting
+only papers in both runs' corpora) make up at least 80% of both topics
+(`TOPIC_MATCH_MIN_KEYWORDS` / `TOPIC_MATCH_MIN_PAPER_OVERLAP`). Matches are
+1-to-1. A continuing topic keeps the previous topic's name and `LineageId`;
+only new topics are named by the LLM. UMAP is seeded
+(`UMAP_RANDOM_STATE`), so re-running the topic stage on the same corpus
+reproduces the same topics.
+
+Each completed run is archived to `pipeline_data/history/<YYYY-MM>/`
+(the month the pipeline ran in): `topics.csv` (lineage, name, keywords,
+trendiness, size, and the match scores against the previous run, recorded
+for the closest previous topic even when unmatched so the thresholds can be
+tuned) and `assignments.csv.gz` (`PaperId,Topic`; `-1` for papers in no
+topic). The next run maps against the newest earlier month, so re-running
+in the same month replaces that month's archive rather than matching
+against it. The archive is the permanent record; the database's
+`topic_history` table is rebuilt from it on every reload.
+
+Useful flags: `--since YYYY-MM-DD` to override where an interrupted
+fetch resumes from, `--skip-fetch` to re-run modelling on the existing corpus only
 (e.g. for testing config changes), `--skip-db-reload` to just write the
 CSVs without touching `data/galenos.db`.
 

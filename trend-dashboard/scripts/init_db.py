@@ -14,7 +14,7 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DB_PATH = os.path.join(BASE_DIR, "data", "galenos.db")
 SCHEMA_PATH = os.path.join(BASE_DIR, "schema.sql")
 
-TABLES = ["paper_topics", "papers", "monthly_counts", "topics"]
+TABLES = ["paper_topics", "papers", "monthly_counts", "topics", "topic_history"]
 
 
 def main():

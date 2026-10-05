@@ -49,11 +49,31 @@ def list_topics(db, q=None, trendy_only=False, limit=None):
 
 def get_topic(db, topic_id):
     row = db.execute(
-        "SELECT topic_id, name, keywords, n_papers, is_trendy, trend_rank, trend_mae "
+        "SELECT topic_id, name, keywords, n_papers, is_trendy, trend_rank, trend_mae, lineage_id "
         "FROM topics WHERE topic_id = ?",
         (topic_id,),
     ).fetchone()
     return _topic_row_to_dict(row) if row else None
+
+
+def get_topic_history(db, lineage_id):
+    """One row per monthly run this topic's lineage appears in, newest first,
+    with the number of trendy topics in that run for context."""
+    if lineage_id is None:
+        return []
+    rows = db.execute(
+        """
+        SELECT h.run_month, h.name, h.keywords, h.n_papers, h.is_trendy, h.trend_rank,
+               h.trendy_position, h.keyword_overlap, h.paper_overlap,
+               (SELECT COUNT(*) FROM topic_history t
+                 WHERE t.run_month = h.run_month AND t.is_trendy = 1) AS n_trendy_in_run
+        FROM topic_history h
+        WHERE h.lineage_id = ?
+        ORDER BY h.run_month DESC
+        """,
+        (lineage_id,),
+    ).fetchall()
+    return [_topic_row_to_dict(r) for r in rows]
 
 
 def get_topic_timeline(db, topic_id):

@@ -35,7 +35,8 @@ def create_app():
         if topic is None:
             abort(404)
         timeline = db.get_topic_timeline(conn, topic_id)
-        return render_template("topic.html", topic=topic, timeline=timeline)
+        history = db.get_topic_history(conn, topic["lineage_id"])
+        return render_template("topic.html", topic=topic, timeline=timeline, history=history)
 
     @app.route("/topic/<int:topic_id>/month/<int:year>/<int:month>")
     def topic_month(topic_id, year, month):

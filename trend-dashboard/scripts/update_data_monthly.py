@@ -2,21 +2,32 @@
 
 Replaces running the original notebooks by hand each month:
 
-  1. fetch_new_papers()          -- OpenAlex search, merged into the corpus
+  1. fetch_papers()               -- full OpenAlex refetch of the rolling corpus window
   2. fit_topic_model()            -- BERTopic refit on the FULL corpus
-  3. name_topics()                 -- LLM-based short names from keywords
-  4. build_paper_topic_matrix()    -- binary Topic0..N columns, thresholded
-  5. build_monthly_mentions()      -- wide PubDate,Topic0,Topic1,... counts
-  6. fit_trend_model()             -- GRU walk-forward prediction + Trendy/RankSum
+  3. build_paper_topic_matrix()   -- binary Topic0..N columns, thresholded
+  4. map_to_previous_run()        -- link topics to the previous run's (history/), inheriting names
+  5. name_topics()                -- LLM-based short names from keywords, for topics not carried over
+  6. build_monthly_mentions()     -- wide PubDate,Topic0,Topic1,... counts
+  7. fit_trend_model()            -- GRU walk-forward prediction + Trendy/RankSum
+  8. archive_run()                -- topics + assignments saved to history/<YYYY-MM>/
+
+The corpus is a rolling window of the CORPUS_WINDOW_MONTHS (120) complete
+calendar months before the current one, and it is refetched in full each
+run rather than topped up: OpenAlex keeps adding papers to past months
+(indexing lag) and updating existing records, and neither shows up in a
+fetch of only newly published papers (filtering on OpenAlex's
+updated/created dates needs a paid plan). Papers that fall out of the
+window are dropped.
 
 ...then writes all five CSVs to --data-dir and does a full
 init_db --reset + import_notebook_outputs.py + compute_embeddings.py refresh
 of the live database (topic ids aren't stable across a full-corpus refit, so
-this is a full rebuild each run, not an incremental patch).
+this is a full rebuild each run, not an incremental patch; continuity across
+runs is carried by the LineageIds archived under --data-dir/history/).
 
 Usage:
     python scripts/update_data_monthly.py --data-dir pipeline_data
-    python scripts/update_data_monthly.py --data-dir pipeline_data --fetch-only  # fetch + dedupe papers.csv, then stop
+    python scripts/update_data_monthly.py --data-dir pipeline_data --fetch-only  # refetch + dedupe papers.csv, then stop
     python scripts/update_data_monthly.py --data-dir pipeline_data --topic-model-only  # topic stage only: refit + name + write topics.csv/paper_topic_assignments.csv, then stop
     python scripts/update_data_monthly.py --data-dir pipeline_data --skip-fetch  # rerun modelling only
     python scripts/update_data_monthly.py --data-dir pipeline_data --skip-fetch --skip-topic-model # rerun trend prediction only
@@ -38,17 +49,43 @@ import torch.nn as nn
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
+
+def load_dotenv(path=os.path.join(BASE_DIR, ".env")):
+    """Minimal KEY=value loader for trend-dashboard/.env (gitignored), so API
+    keys needn't be exported in every shell. Variables already set in the
+    environment take precedence."""
+    if not os.path.exists(path):
+        return
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            value = value.strip().strip('"').strip("'")
+            if value:
+                os.environ.setdefault(key.strip(), value)
+
+
+load_dotenv()
+
 search_term = '("mental" OR "psychological" OR "behavioural" OR "psychology" OR "psychiatry" OR "neurological" OR "mind" OR "brain" OR "behaviour" OR "psychiatric") \
               AND ("anxiety" OR "depression" OR "psychosis") AND ("treatment" OR "therapy" OR "therapeutic" OR "mechanism" OR "intervention" OR "early" OR "diagnosis" OR "diagnostic" OR "translation")'
 OPENALEX_FILTER = f"has_abstract:true,title_and_abstract.search:{search_term},language:en" 
 OPENALEX_MAILTO = os.environ.get("OPENALEX_MAILTO", "user.name@example.com")  # OpenAlex's "polite pool"
-FETCH_CITATIONS = True  # True fetches each paper's full citing-ID list (one extra API call per paper — slow)
+CORPUS_WINDOW_MONTHS = 120      # the corpus is a rolling window of this many complete calendar months
+MAX_CORPUS_SHRINK = 0.05        # refuse to replace papers.csv if a refetch comes back this much smaller
 
 OPENALEX_API_KEY = os.environ.get("OPENALEX_API_KEY")  # optional; unlocks OpenAlex's premium rate limits
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")      # DeepInfra token (used with the base_url below)
 
 
 ASSIGNMENT_THRESHOLD = 0.08     # per the paper's methodology
+UMAP_RANDOM_STATE = 73          # fixed so re-running the topic stage on the same corpus gives the same topics
+                                # (UMAP is otherwise nondeterministic; fixing it also makes UMAP single-threaded)
+TOPIC_MATCH_MIN_KEYWORDS = 10       # a topic continues one from the previous run if at least this many of the
+TOPIC_MATCH_MIN_PAPER_OVERLAP = 0.8 # 15 keywords are shared AND the shared papers (among papers in both runs'
+                                    # corpora) make up at least this share of BOTH topics
 SLIDING_WINDOW_MONTHS = 6       # per the paper's methodology
 TREND_N_MONTHS = 4              # of the last...
 TREND_M_MONTHS = 6               # ...months, actual must exceed predicted to count as trendy
@@ -75,26 +112,30 @@ def reconstruct_abstract(inverted_index):
     return " ".join(positions[i] for i in sorted(positions))
 
 
-def fetch_citing_ids(work, mailto, max_ids=2000):
-    """Follow a work's cited_by_api_url to collect the OpenAlex ids of
-    papers that cite it (pipe-delimited, to match the existing Citations
-    column format). Slow -- one extra paginated API call per paper."""
-    url = work.get("cited_by_api_url")
-    if not url:
-        return ""
-    ids, cursor = [], "*"
-    while cursor and len(ids) < max_ids:
-        resp = requests.get(url, params={"cursor": cursor, "per-page": 200, "mailto": mailto}, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
-        ids.extend(r["id"].rsplit("/", 1)[-1] for r in data["results"])
-        cursor = data.get("meta", {}).get("next_cursor")
-        if not data["results"]:
-            break
-    return "|".join(ids[:max_ids])
+def corpus_window(today=None):
+    """(first_day, last_day) of the rolling corpus window: the
+    CORPUS_WINDOW_MONTHS complete calendar months before the current one.
+    E.g. on any day in Oct 2026 -> (2016-10-01, 2026-09-30)."""
+    today = today or date.today()
+    last_day = today.replace(day=1) - timedelta(days=1)
+    first_month_index = today.year * 12 + (today.month - 1) - CORPUS_WINDOW_MONTHS
+    first_day = date(first_month_index // 12, first_month_index % 12 + 1, 1)
+    return first_day, last_day
 
 
-def normalize_work(work, mailto, fetch_citations):
+def restrict_to_window(df, window):
+    """Drop rows whose PubDate falls outside `window` (or is unparseable)."""
+    if df is None or df.empty:
+        return df
+    pub = pd.to_datetime(df["PubDate"], errors="coerce")
+    in_window = (pub >= pd.Timestamp(window[0])) & (pub <= pd.Timestamp(window[1]))
+    n_dropped = int((~in_window).sum())
+    if n_dropped:
+        print(f"  dropped {n_dropped} paper(s) published outside {window[0]} .. {window[1]}")
+    return df[in_window].reset_index(drop=True)
+
+
+def normalize_work(work):
     paper_id = work["id"].rsplit("/", 1)[-1]
     title = work.get("title") or work.get("display_name") or ""
     abstract = reconstruct_abstract(work.get("abstract_inverted_index"))
@@ -103,12 +144,11 @@ def normalize_work(work, mailto, fetch_citations):
     )
     concepts = sorted(work.get("concepts") or [], key=lambda c: -(c.get("score") or 0))[:3]
     fields_of_study = "; ".join(c["display_name"] for c in concepts)
-    citations = fetch_citing_ids(work, mailto) if fetch_citations else ""
 
     return {
         "PaperId": paper_id,
         "PaperTitle": title,
-        "Citations": citations,
+        "CitedByCount": work.get("cited_by_count") or 0,
         "coFoS": fields_of_study,
         "Authors": authors,
         "Abstract": abstract,
@@ -118,32 +158,27 @@ def normalize_work(work, mailto, fetch_citations):
     }
 
 
-def fetch_new_papers(since_date, filter_str=OPENALEX_FILTER, mailto=OPENALEX_MAILTO,
-                      api_key=OPENALEX_API_KEY, fetch_citations=FETCH_CITATIONS, max_pages=None):
-    """Page through OpenAlex works matching `filter_str` published on/after
-    `since_date` (a date or 'YYYY-MM-DD' string).
+def fetch_papers(since_date, until_date, filter_str=OPENALEX_FILTER, mailto=OPENALEX_MAILTO,
+                 api_key=OPENALEX_API_KEY, max_pages=None):
+    """Page through OpenAlex works matching `filter_str` published between
+    `since_date` and `until_date` inclusive (dates or 'YYYY-MM-DD' strings).
 
     Returns (rows, resume_date, complete):
       - rows: list of dicts matching the papers.csv schema (whatever was
-        successfully fetched -- possibly not all of it, see below). Papers
-        dated beyond the current calendar month are excluded (OpenAlex
-        occasionally has forward-dated entries; the dashboard would count
-        them in a month that hasn't happened yet).
-      - resume_date: the publication date to pass as --since on the next
+        successfully fetched -- possibly not all of it, see below).
+      - resume_date: the publication date to resume from on the next
         run to continue from here. Deliberately the same date as the last
         paper actually fetched (not the day after), since OpenAlex's
         from_publication_date filter is inclusive: if a failure happens
         mid-page, there could be other papers with that exact same date
         still unfetched. Re-including that one day means a handful of
-        already-fetched papers get refetched (harmless -- merge_papers()
-        dedupes by PaperId and by title+abstract), which is a small price
-        for not silently
-        missing same-day papers.
+        already-fetched papers get refetched (harmless -- they're deduped
+        by PaperId), which is a small price for not silently missing
+        same-day papers.
       - complete: False if a network error cut the fetch short (results
         are sorted oldest-first, so `rows` is everything from `since_date`
         up to `resume_date`, not a scattered partial sample); True if
-        pagination ran to completion normally (including if it stopped
-        early on hitting future-dated papers -- see below).
+        pagination ran to completion normally.
 
     Network errors (timeouts, connection resets, HTTP errors) are retried
     a few times with backoff before being treated as a real failure, so a
@@ -151,13 +186,14 @@ def fetch_new_papers(since_date, filter_str=OPENALEX_FILTER, mailto=OPENALEX_MAI
     """
     if isinstance(since_date, date):
         since_date = since_date.isoformat()
+    if isinstance(until_date, date):
+        until_date = until_date.isoformat()
 
     base_url = "https://api.openalex.org/works"
-    full_filter = f"{filter_str},from_publication_date:{since_date}"
+    full_filter = f"{filter_str},from_publication_date:{since_date},to_publication_date:{until_date}"
     cursor = "*"
     rows = []
     resume_date = since_date
-    current_month = date.today().strftime("%Y-%m")
     page = 0
     max_retries = 3
     retry_backoff_seconds = (5, 15, 30)
@@ -167,8 +203,7 @@ def fetch_new_papers(since_date, filter_str=OPENALEX_FILTER, mailto=OPENALEX_MAI
         last_error = None
         params = {
             "filter": full_filter, "per-page": 200, "cursor": cursor,
-            "sort": "publication_date:asc",  # so "resume from the latest date fetched" is valid,
-                                              # and so future-dated entries (if any) all end up at the end
+            "sort": "publication_date:asc",  # so "resume from the latest date fetched" is valid
             "mailto": mailto,
         }
         if api_key:
@@ -190,28 +225,21 @@ def fetch_new_papers(since_date, filter_str=OPENALEX_FILTER, mailto=OPENALEX_MAI
         if data is None:
             print(f"  giving up after {max_retries} attempts on page {page + 1}. "
                   f"{len(rows)} paper(s) fetched so far this run ({last_error}).")
-            print(f"  RESUME FROM: --since {resume_date}")
             return rows, resume_date, False
 
+        if page == 0:
+            print(f"  OpenAlex reports {data.get('meta', {}).get('count')} matching paper(s)")
         results = data.get("results", [])
-        hit_future_date = False
         for work in results:
-            row = normalize_work(work, mailto, fetch_citations)
-            if row["PubDate"] and row["PubDate"][:7] > current_month:
-                # Sorted ascending, so every remaining paper (this page and
-                # all later pages) is also future-dated -- stop entirely
-                # rather than paginating further just to skip them.
-                print(f"  reached a future-dated paper ({row['PaperId']}, {row['PubDate']}); stopping fetch here")
-                hit_future_date = True
-                break
+            row = normalize_work(work)
             rows.append(row)
             if row["PubDate"]:
                 resume_date = max(resume_date, row["PubDate"])
-        if hit_future_date:
-            return rows, resume_date, True
 
         cursor = data.get("meta", {}).get("next_cursor")
         page += 1
+        if page % 100 == 0:
+            print(f"  ...{len(rows)} paper(s) fetched, up to {resume_date}")
         if not results or (max_pages and page >= max_pages):
             break
         time.sleep(0.1)  # be polite to the API
@@ -236,8 +264,8 @@ def _normalize_text(series):
 def merge_papers(existing_df, new_rows):
     """Append new_rows to existing_df and dedupe, in two passes:
 
-      1. by PaperId -- new rows win on conflict, though the
-         from_publication_date filter should make those rare;
+      1. by PaperId -- new rows win on conflict (e.g. the overlapping
+         day refetched when resuming an interrupted fetch);
       2. by normalized title + abstract -- OpenAlex sometimes indexes the
          same paper under more than one work id (a preprint and its
          published version, or a plain duplicate record), so identical
@@ -341,7 +369,7 @@ def fit_topic_model(papers_df):
 
     # Instantiate UMAP and HDBSCAN with desired parameters
     # Ensure these are NOT dictionaries
-    umap_model = UMAP(n_neighbors=18, n_components=12, metric='cosine')
+    umap_model = UMAP(n_neighbors=18, n_components=12, metric='cosine', random_state=UMAP_RANDOM_STATE)
     hdbscan_model = HDBSCAN(min_cluster_size=22, min_samples=15, metric='euclidean')
 
     # Initialize BERTopic with more words per topic
@@ -380,11 +408,187 @@ def summarize_topic_model(topic_model):
 
 
 # ==========================================================================
-# 3. Topic naming
+# 3. Binary paper-topic assignment matrix
 # ==========================================================================
 
-def name_topics(topic_model):
-    topic_ids = sorted(t for t in topic_model.get_topics().keys() if t != -1)
+def build_paper_topic_matrix(papers_df, topic_distr, threshold=ASSIGNMENT_THRESHOLD):
+    """Return a DataFrame with the papers.csv columns plus binary
+    Topic0..TopicN columns, matching the paper-topic assignment file
+    format the importer expects."""
+    n_topics = topic_distr.shape[1]
+    binary = (topic_distr > threshold).astype(int)
+    topic_cols = pd.DataFrame(binary, columns=[f"Topic{i}" for i in range(n_topics)])
+    out = pd.concat([papers_df.reset_index(drop=True), topic_cols], axis=1)
+    return out
+
+
+# ==========================================================================
+# 4. Topic history: map this run's topics onto the previous run's
+#
+# Topic ids aren't stable across full-corpus refits, so continuity is
+# tracked separately: every topic carries a LineageId, inherited from the
+# previous run's topic it continues (and with it, that topic's name), or
+# newly allocated if it doesn't continue any. Each completed run is
+# archived under <data-dir>/history/<YYYY-MM of the run>/ -- topics.csv
+# (lineage, name, keywords, trendiness, match scores) plus
+# assignments.csv.gz (PaperId,Topic; Topic -1 for papers in no topic) --
+# which is what the next run maps against, and what the dashboard's
+# topic History panel is built from.
+# ==========================================================================
+
+def topic_keywords(topic_model, n_topics):
+    return {t: [w for w, _ in topic_model.get_topic(t)[:15]] for t in range(n_topics)}
+
+
+def history_label(today=None):
+    """History folders are named after the month the pipeline ran in."""
+    return (today or date.today()).strftime("%Y-%m")
+
+
+def _archived_labels(history_dir, before):
+    if not os.path.isdir(history_dir):
+        return []
+    return sorted(d for d in os.listdir(history_dir) if re.match(r"^\d{4}-\d{2}$", d) and d < before)
+
+
+def load_previous_run(history_dir, label):
+    """(label, topics_df, assignments_df) for the newest archived run before
+    `label`, or None. Re-running in the same month therefore maps against
+    the previous month again, not against the run being replaced."""
+    earlier = _archived_labels(history_dir, label)
+    if not earlier:
+        return None
+    prev = earlier[-1]
+    topics = pd.read_csv(os.path.join(history_dir, prev, "topics.csv"))
+    assignments = pd.read_csv(os.path.join(history_dir, prev, "assignments.csv.gz"))
+    return prev, topics, assignments
+
+
+def next_lineage_id(history_dir, label):
+    """One more than the highest LineageId in any archived run before `label`."""
+    ids = [pd.read_csv(os.path.join(history_dir, d, "topics.csv"), usecols=["LineageId"])["LineageId"].max()
+           for d in _archived_labels(history_dir, label)]
+    return int(max(ids)) + 1 if ids else 0
+
+
+def map_to_previous_run(keywords, paper_topic_matrix, previous, first_new_lineage_id,
+                        min_keywords=TOPIC_MATCH_MIN_KEYWORDS, min_paper_overlap=TOPIC_MATCH_MIN_PAPER_OVERLAP):
+    """Match this run's topics 1-to-1 onto the previous run's.
+
+    For every (previous, current) topic pair:
+      - KeywordOverlap: how many of the 15 keywords they share;
+      - PaperOverlap: among papers present in both runs' corpora, the
+        shared papers as a share of the previous topic and of the current
+        topic -- whichever is smaller, so a topic that merely absorbed
+        another (or was split off one) doesn't count as a continuation.
+    Pairs meeting both thresholds are matched greedily, best first (by
+    PaperOverlap + KeywordOverlap/15), so each topic continues at most one.
+
+    Returns one row per current topic: Topic, LineageId, InheritedName
+    (None unless matched), Matched, and PrevTopic/KeywordOverlap/
+    PaperOverlap -- for the matched topic, or for the closest previous
+    topic if unmatched, so thresholds can be tuned from the output.
+    """
+    import ast
+    import scipy.sparse as sp
+
+    n_cur = len(keywords)
+    out = pd.DataFrame({"Topic": range(n_cur), "LineageId": pd.array([pd.NA] * n_cur, dtype="Int64"),
+                        "InheritedName": None, "Matched": False,
+                        "PrevTopic": pd.array([pd.NA] * n_cur, dtype="Int64"),
+                        "KeywordOverlap": pd.array([pd.NA] * n_cur, dtype="Int64"), "PaperOverlap": np.nan})
+    if previous is None:
+        print("  no previous run archived; every topic starts a new lineage")
+        out["LineageId"] = first_new_lineage_id + out["Topic"]
+        return out
+
+    prev_label, prev_topics, prev_assign = previous
+    prev_topics = prev_topics.sort_values("Topic").reset_index(drop=True)
+    n_prev = len(prev_topics)
+
+    # Paper overlap, restricted to papers in both corpora
+    topic_cols = [f"Topic{t}" for t in range(n_cur)]
+    cur_ids = paper_topic_matrix["PaperId"].to_numpy()
+    common = np.intersect1d(cur_ids, prev_assign["PaperId"].unique())
+    cur = sp.csr_matrix(paper_topic_matrix[topic_cols].to_numpy(dtype=np.int8)[pd.Index(cur_ids).get_indexer(common)],
+                        dtype=np.int32)
+    pa = prev_assign[(prev_assign["Topic"] >= 0) & prev_assign["PaperId"].isin(common)]
+    prev = sp.csr_matrix((np.ones(len(pa), dtype=np.int32),
+                          (pd.Index(common).get_indexer(pa["PaperId"]), pa["Topic"].to_numpy())),
+                         shape=(len(common), n_prev))
+    shared = (prev.T @ cur).toarray().astype(float)
+    prev_sizes, cur_sizes = prev.sum(axis=0).A1, cur.sum(axis=0).A1
+    with np.errstate(divide="ignore", invalid="ignore"):
+        paper_overlap = np.nan_to_num(np.minimum(shared / prev_sizes[:, None], shared / cur_sizes[None, :]))
+
+    prev_kw = [set(ast.literal_eval(w)) for w in prev_topics["Words"]]
+    cur_kw = [set(keywords[t]) for t in range(n_cur)]
+    kw_overlap = np.array([[len(p & c) for c in cur_kw] for p in prev_kw])
+
+    score = paper_overlap + kw_overlap / 15
+    passing = (kw_overlap >= min_keywords) & (paper_overlap >= min_paper_overlap)
+    candidates = sorted(zip(*np.nonzero(passing)), key=lambda ij: -score[ij])
+    used_prev, matched = set(), {}
+    for i, j in candidates:
+        if i not in used_prev and j not in matched:
+            used_prev.add(i)
+            matched[j] = i
+
+    next_id = first_new_lineage_id
+    for j in range(n_cur):
+        i = matched.get(j, int(score[:, j].argmax()))
+        out.loc[j, ["PrevTopic", "KeywordOverlap", "PaperOverlap"]] = [
+            int(prev_topics.loc[i, "Topic"]), int(kw_overlap[i, j]), round(float(paper_overlap[i, j]), 3)]
+        if j in matched:
+            out.loc[j, ["LineageId", "InheritedName", "Matched"]] = [
+                int(prev_topics.loc[i, "LineageId"]), prev_topics.loc[i, "Name"], True]
+        else:
+            out.loc[j, "LineageId"] = next_id
+            next_id += 1
+
+    print(f"  {len(common)} papers in both this corpus and the {prev_label} run's")
+    print(f"  {len(matched)} of {n_cur} topics continue one of the {n_prev} topics from {prev_label} "
+          f"(>= {min_keywords}/15 keywords and >= {min_paper_overlap:.0%} shared papers); "
+          f"{n_cur - len(matched)} new; {n_prev - len(matched)} {prev_label} topic(s) not continued")
+    return out
+
+
+def archive_run(history_dir, label, topics_df, paper_topic_matrix, predictions_df):
+    """Write this run's topics (with trendiness) and compact assignments to
+    history/<label>/, replacing any earlier archive of the same month."""
+    folder = os.path.join(history_dir, label)
+    os.makedirs(folder, exist_ok=True)
+    topic_cols = [f"Topic{t}" for t in topics_df["Topic"]]
+    binary = paper_topic_matrix[topic_cols].to_numpy(dtype=np.int8)
+    paper_ids = paper_topic_matrix["PaperId"].to_numpy()
+    rows, cols = np.nonzero(binary)
+    unassigned = paper_ids[binary.sum(axis=1) == 0]
+    assignments = pd.concat([
+        pd.DataFrame({"PaperId": paper_ids[rows], "Topic": topics_df["Topic"].to_numpy()[cols]}),
+        pd.DataFrame({"PaperId": unassigned, "Topic": -1}),
+    ], ignore_index=True)
+    assignments.to_csv(os.path.join(folder, "assignments.csv.gz"), index=False)
+
+    archived = topics_df.merge(predictions_df[["Topic", "Trendy", "RankSum"]], on="Topic", how="left")
+    archived["NPapers"] = binary.sum(axis=0)
+    archived.to_csv(os.path.join(folder, "topics.csv"), index=False)
+    print(f"  archived {len(archived)} topics and {len(assignments)} paper assignments to {folder}")
+
+
+# ==========================================================================
+# 5. Topic naming
+# ==========================================================================
+
+def name_topics(keywords, inherited_names):
+    """Topics that continue one from the previous run keep its name
+    (`inherited_names`: topic id -> name); the rest are named by the LLM
+    from their keywords, falling back to the top three keywords if the
+    call fails."""
+    to_name = sorted(t for t in keywords if t not in inherited_names)
+    print(f"  {len(keywords) - len(to_name)} topic name(s) carried over; {len(to_name)} to name")
+    results = dict(inherited_names)
+    if not to_name:
+        return results
 
     from openai import OpenAI
 
@@ -405,34 +609,18 @@ def name_topics(topic_model):
         response=completion.choices[0].message.content
         return(response)
 
-    results = {}
-    for topic_id in topic_ids:
-        keywords = [w for w, _ in topic_model.get_topic(topic_id)[:15]]
+    for topic_id in to_name:
         try:
-            name = generateFromPrompt(f"Please give a concise phrase to describe the main research topic within the field of mental health that unifies the following words and indicates the mental health relevance: {keywords}. Please return only the word or phrase with no explanation. Topic: ")
-        except Exception as e:  # Keep the pipeline running even if naming fails?
-            print(f"  LLM naming failed for topic {topic_id} ({e})")
-        results[topic_id] = (name, keywords)
+            name = generateFromPrompt(f"Please give a concise phrase to describe the main research topic within the field of mental health that unifies the following words and indicates the mental health relevance: {keywords[topic_id]}. Please return only the word or phrase with no explanation. Topic: ").strip()
+        except Exception as e:
+            print(f"  LLM naming failed for topic {topic_id} ({e}); using its top keywords instead")
+            name = ", ".join(keywords[topic_id][:3])
+        results[topic_id] = name
     return results
 
 
 # ==========================================================================
-# 4. Binary paper-topic assignment matrix
-# ==========================================================================
-
-def build_paper_topic_matrix(papers_df, topic_distr, threshold=ASSIGNMENT_THRESHOLD):
-    """Return a DataFrame with the papers.csv columns plus binary
-    Topic0..TopicN columns, matching the paper-topic assignment file
-    format the importer expects."""
-    n_topics = topic_distr.shape[1]
-    binary = (topic_distr > threshold).astype(int)
-    topic_cols = pd.DataFrame(binary, columns=[f"Topic{i}" for i in range(n_topics)])
-    out = pd.concat([papers_df.reset_index(drop=True), topic_cols], axis=1)
-    return out
-
-
-# ==========================================================================
-# 5. Monthly mention counts (wide format)
+# 6. Monthly mention counts (wide format)
 # ==========================================================================
 
 def build_monthly_mentions(paper_topic_matrix):
@@ -464,7 +652,7 @@ def build_monthly_mentions(paper_topic_matrix):
 
 
 # ==========================================================================
-# 6. Trend prediction model
+# 7. Trend prediction model
 #
 # This is a PyTorch port of a TensorFlow/Keras notebook, kept deliberately
 # close to the original's specific (and slightly unusual) design rather
@@ -749,6 +937,19 @@ def latest_pub_date(papers_df):
     return dates.max().date() if not dates.empty else None
 
 
+def report_corpus_changes(old_df, new_df):
+    """Print how the refetched corpus differs from the previous papers.csv."""
+    if old_df is None or old_df.empty:
+        return
+    old_ids, new_ids = set(old_df["PaperId"]), set(new_df["PaperId"])
+    common = old_df[old_df["PaperId"].isin(new_ids)].set_index("PaperId")
+    updated = new_df[new_df["PaperId"].isin(old_ids)].set_index("PaperId").loc[common.index]
+    content_cols = ["PaperTitle", "Abstract", "PubDate"]
+    changed = (common[content_cols].astype(str) != updated[content_cols].astype(str)).any(axis=1)
+    print(f"  vs previous corpus: +{len(new_ids - old_ids)} added, -{len(old_ids - new_ids)} removed, "
+          f"{int(changed.sum())} with a changed title/abstract/date")
+
+
 def run_pipeline(data_dir, since=None, skip_fetch=False, skip_topic_model=False,
                  fetch_only=False, topic_model_only=False):
     os.makedirs(data_dir, exist_ok=True)
@@ -757,33 +958,59 @@ def run_pipeline(data_dir, since=None, skip_fetch=False, skip_topic_model=False,
     monthly_path = os.path.join(data_dir, "monthly_mentions.csv")
     predictions_path = os.path.join(data_dir, "trendy_predictions.csv")
     paper_topics_path = os.path.join(data_dir, "paper_topic_assignments.csv")
+    staging_path = os.path.join(data_dir, "papers_fetching.csv")
+    history_dir = os.path.join(data_dir, "history")
+    run_label = history_label()
 
     existing_papers = pd.read_csv(papers_path) if os.path.exists(papers_path) else pd.DataFrame()
 
-    print("[1/6] Fetching new papers from OpenAlex...")
+    window = corpus_window()
+    print(f"[1/8] Fetching papers published {window[0]} .. {window[1]} from OpenAlex...")
     if skip_fetch:
         print("  --skip-fetch set; using existing papers only")
         papers_df = existing_papers
     else:
-        since_date = since or latest_pub_date(existing_papers) or (date.today() - timedelta(days=365 * 10))
+        # Fetch into a staging file and only replace papers.csv once the
+        # whole window has been fetched, so an interrupted run never leaves
+        # a half-refreshed corpus behind -- re-running resumes from the
+        # staging file's newest PubDate instead.
+        staged = pd.read_csv(staging_path) if os.path.exists(staging_path) else pd.DataFrame()
+        if not staged.empty:
+            print(f"  resuming the interrupted fetch in {staging_path} ({len(staged)} papers so far)")
+        since_date = since or latest_pub_date(staged) or window[0]
         print(f"  fetching papers published on/after {since_date}")
-        new_rows, resume_date, fetch_complete = fetch_new_papers(since_date)
-        print(f"  fetched {len(new_rows)} new paper(s) this run")
-        papers_df = merge_papers(existing_papers, new_rows)
-        print(f"  corpus now has {len(papers_df)} papers total")
-        papers_df.to_csv(papers_path, index=False)  # save progress BEFORE deciding whether to continue
+        new_rows, resume_date, fetch_complete = fetch_papers(since_date, window[1])
+        print(f"  fetched {len(new_rows)} paper(s) this run")
+        staged = merge_papers(staged, new_rows)
+        staged.to_csv(staging_path, index=False)  # save progress BEFORE deciding whether to continue
 
         if not fetch_complete:
             print()
-            print(f"  Fetch was interrupted by a network error. Progress saved to {papers_path}.")
+            print(f"  Fetch was interrupted by a network error. Progress saved to {staging_path}; "
+                  f"{papers_path} is unchanged.")
             print(f"  Re-run the exact same command to continue -- it will automatically resume from "
-                  f"{resume_date} (found via the newest PubDate now in papers.csv). Stopping here rather "
+                  f"{resume_date} (the newest PubDate in the staging file). Stopping here rather "
                   "than running the topic/trend model on a corpus that's still mid-fetch.")
             return {
                 "papers": papers_path, "topics": topics_path, "monthly": monthly_path,
                 "predictions": predictions_path, "paper_topics": paper_topics_path,
                 "incomplete_fetch": True,
             }
+
+        papers_df = restrict_to_window(staged, window)
+        previous = restrict_to_window(existing_papers, window)
+        report_corpus_changes(previous, papers_df)
+        if previous is not None and len(papers_df) < (1 - MAX_CORPUS_SHRINK) * len(previous):
+            raise SystemExit(
+                f"Refetched corpus has {len(papers_df)} papers vs {len(previous)} previously in the same "
+                f"window -- a drop of more than {MAX_CORPUS_SHRINK:.0%}, which suggests a problem on "
+                f"OpenAlex's side or with the query. {papers_path} was NOT replaced; the refetch is in "
+                f"{staging_path}. Inspect it, then either delete it and re-run, or move it over "
+                f"{papers_path} and re-run with --skip-fetch if the drop is genuine."
+            )
+        papers_df.to_csv(papers_path, index=False)
+        os.remove(staging_path)
+        print(f"  corpus now has {len(papers_df)} papers total")
 
         if fetch_only:
             print()
@@ -795,55 +1022,61 @@ def run_pipeline(data_dir, since=None, skip_fetch=False, skip_topic_model=False,
                 "fetch_only": True,
             }
 
-        if skip_topic_model and new_rows:
-            print(f"  WARNING: {len(new_rows)} new paper(s) were fetched but --skip-topic-model means "
-                  "they won't be topic-modelled or counted below, since the paper-topic matrix is being "
+        if skip_topic_model:
+            print("  WARNING: the corpus was refetched but --skip-topic-model means the changes "
+                  "won't be topic-modelled or counted below, since the paper-topic matrix is being "
                   "reloaded from a previous run instead of rebuilt. Use --skip-fetch alongside "
                   "--skip-topic-model when you just want to rerun the trend model on unchanged data.")
 
     if skip_fetch:
+        papers_df = restrict_to_window(papers_df, window)
         print(f"  corpus now has {len(papers_df)} papers total")
         if not topic_model_only:  # --topic-model-only doesn't touch the corpus file
             papers_df.to_csv(papers_path, index=False)
 
     if skip_topic_model:
-        print("[2-4/6] --skip-topic-model set; reloading topics and paper-topic matrix from --data-dir...")
+        print("[2-5/8] --skip-topic-model set; reloading topics and paper-topic matrix from --data-dir...")
         if not (os.path.exists(topics_path) and os.path.exists(paper_topics_path)):
             raise SystemExit(
                 f"--skip-topic-model requires an existing {topics_path} and {paper_topics_path} "
                 "from a previous full run."
             )
         topics_df = pd.read_csv(topics_path)
-        paper_topic_matrix = pd.read_csv(paper_topics_path)
+        paper_topic_matrix = restrict_to_window(pd.read_csv(paper_topics_path), window)
         n_topic_cols = len([c for c in paper_topic_matrix.columns if re.match(r"^Topic\d+$", c)])
         print(f"  loaded {len(topics_df)} topics, {len(paper_topic_matrix)} paper-topic rows "
               f"({n_topic_cols} topic columns)")
     else:
-        print("[2/6] Refitting the topic model on the full corpus...")
+        print("[2/8] Refitting the topic model on the full corpus...")
         topic_model, docs, topic_distr = fit_topic_model(papers_df)
         n_topics = topic_distr.shape[1]
         print(f"  found {n_topics} topics across {len(docs)} documents")
         summarize_topic_model(topic_model)
 
-        print("[3/6] Naming topics...")
-        names_and_keywords = name_topics(topic_model)
-        topics_df = pd.DataFrame(
-            [
-                {"Topic": tid, "Name": name, "Words": keywords}
-                for tid, (name, keywords) in sorted(names_and_keywords.items())
-            ]
-        )
-        topics_df.to_csv(topics_path, index=False)
-
-        print("[4/6] Building the binary paper-topic assignment matrix...")
+        print("[3/8] Building the binary paper-topic assignment matrix...")
         paper_topic_matrix = build_paper_topic_matrix(papers_df, topic_distr)
         paper_topic_matrix.to_csv(paper_topics_path, index=False)
+
+        print(f"[4/8] Mapping topics onto the previous run's ({history_dir})...")
+        keywords = topic_keywords(topic_model, n_topics)
+        mapping = map_to_previous_run(keywords, paper_topic_matrix,
+                                      load_previous_run(history_dir, run_label),
+                                      next_lineage_id(history_dir, run_label))
+
+        print("[5/8] Naming topics...")
+        inherited = {int(r.Topic): r.InheritedName for r in mapping.itertuples() if r.Matched}
+        names = name_topics(keywords, inherited)
+        topics_df = pd.DataFrame({"Topic": range(n_topics),
+                                  "Name": [names[t] for t in range(n_topics)],
+                                  "Words": [keywords[t] for t in range(n_topics)]})
+        topics_df = topics_df.merge(mapping.drop(columns="InheritedName"), on="Topic")
+        topics_df.to_csv(topics_path, index=False)
 
         if topic_model_only:
             print()
             print(f"  --topic-model-only set; wrote {topics_path} ({len(topics_df)} topics) "
                   f"and {paper_topics_path}. Stopped before monthly mentions, the trend "
-                  "model and the DB reload.")
+                  "model, the history archive and the DB reload.")
             print(f"  To finish from here without refitting: "
                   f"python scripts/update_data_monthly.py --data-dir {data_dir} "
                   "--skip-fetch --skip-topic-model")
@@ -853,16 +1086,22 @@ def run_pipeline(data_dir, since=None, skip_fetch=False, skip_topic_model=False,
                 "topic_model_only": True,
             }
 
-    print("[5/6] Building monthly mention counts...")
+    print("[6/8] Building monthly mention counts...")
     monthly_df = build_monthly_mentions(paper_topic_matrix)
     monthly_df.to_csv(monthly_path, index=False)
 
-    print("[6/6] Fitting the trend model and computing trendiness...")
+    print("[7/8] Fitting the trend model and computing trendiness...")
     predictions_df = fit_trend_model(monthly_df, checkpoint_path=predictions_path)
     predictions_df.to_csv(predictions_path, index=False)
 
     n_trendy = int(predictions_df["Trendy"].sum()) if not predictions_df.empty else 0
     print(f"  {n_trendy} of {len(predictions_df)} topics flagged trendy")
+
+    print(f"[8/8] Archiving this run as {run_label}...")
+    if "LineageId" in topics_df.columns:
+        archive_run(history_dir, run_label, topics_df, paper_topic_matrix, predictions_df)
+    else:
+        print(f"  {topics_path} has no LineageId column (it predates topic history); not archiving")
 
     return {
         "papers": papers_path,
@@ -870,6 +1109,7 @@ def run_pipeline(data_dir, since=None, skip_fetch=False, skip_topic_model=False,
         "monthly": monthly_path,
         "predictions": predictions_path,
         "paper_topics": paper_topics_path,
+        "history": history_dir,
     }
 
 
@@ -889,6 +1129,7 @@ def reload_database(paths):
             "--predictions", paths["predictions"],
             "--papers", paths["papers"],
             "--paper-topics", paths["paper_topics"],
+            "--history-dir", paths["history"],
         ],
         check=True,
     )
@@ -901,13 +1142,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default=os.path.join(BASE_DIR, "pipeline_data"),
                          help="where the pipeline's CSVs are read from/written to")
-    parser.add_argument("--since", default=None, help="YYYY-MM-DD; defaults to the day after the "
-                         "newest paper already on file, or 10 years ago if there's no existing corpus")
+    parser.add_argument("--since", default=None, help="YYYY-MM-DD; override where an interrupted fetch "
+                         "resumes from. Normally not needed: each run refetches the whole rolling "
+                         f"{CORPUS_WINDOW_MONTHS}-month window, resuming automatically from "
+                         "papers_fetching.csv if the previous run was interrupted")
     parser.add_argument("--skip-fetch", action="store_true",
                          help="skip the OpenAlex fetch and just re-run modelling on the existing corpus "
                               "(useful for testing, or if you fetched papers separately)")
     parser.add_argument("--fetch-only", action="store_true",
-                         help="run only the OpenAlex fetch + dedupe, write papers.csv, then stop "
+                         help="run only the OpenAlex refetch + dedupe, write papers.csv, then stop "
                               "before the topic/trend model (implies --skip-db-reload)")
     parser.add_argument("--skip-topic-model", action="store_true",
                          help="skip refitting BERTopic and naming topics; reload topics.csv and "

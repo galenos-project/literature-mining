@@ -625,6 +625,35 @@ a:focus-visible, select:focus-visible, button:focus-visible {
   margin: 0;
 }
 
+.panel--spaced { margin-top: 1.5rem; }
+
+.table-scroll { overflow-x: auto; }
+
+.history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.history-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--muted);
+  font-size: 0.78rem;
+  border-bottom: 1px solid var(--line);
+  padding: 0.4rem 0.75rem 0.5rem 0;
+}
+
+.history-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 0.55rem 0.75rem 0.55rem 0;
+  vertical-align: top;
+}
+
+.history-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.history-table .mono { font-family: var(--font-mono); font-size: 0.8rem; white-space: nowrap; }
+.history-table .muted { color: var(--muted); }
+
 .empty-state {
   color: var(--muted);
   font-style: italic;

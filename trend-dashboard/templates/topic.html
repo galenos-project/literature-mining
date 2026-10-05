@@ -25,6 +25,44 @@
   </div>
   <div id="topic-detail-chart" class="chart chart--tall"></div>
 </section>
+
+<section class="panel panel--spaced">
+  <div class="panel__head">
+    <h2>History</h2>
+    <p class="panel__hint">This topic in each monthly update. Topics are re-derived every month; a topic is
+      linked to the previous month's when most of its keywords and papers carry over (scores in the last column).</p>
+  </div>
+  {% if history|length > 1 %}
+  <div class="table-scroll">
+    <table class="history-table">
+      <thead>
+        <tr>
+          <th>Update</th><th>Name</th><th>Trendiness</th><th class="num">Papers</th><th>Carried over from previous month</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for h in history %}
+        <tr>
+          <td class="mono">{{ h.run_month }}</td>
+          <td>{{ h.name }}</td>
+          <td>
+            {% if h.is_trendy %}<span class="badge badge--trendy">#{{ h.trendy_position }} of {{ h.n_trendy_in_run }}</span>
+            {% else %}<span class="muted">not trending</span>{% endif %}
+          </td>
+          <td class="num">{{ "{:,}".format(h.n_papers) if h.n_papers is not none else "" }}</td>
+          <td>
+            {% if h.keyword_overlap is not none %}{{ h.keyword_overlap }}/15 keywords &middot; {{ "%.0f"|format(h.paper_overlap * 100) }}% of papers
+            {% else %}<span class="muted">first appearance</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty-state">New this month: no topic in an earlier update matched this one.</p>
+  {% endif %}
+</section>
 {% endblock %}
 
 {% block head %}
