@@ -1,0 +1,39 @@
+{# Study-type breakdown: the chart is drawn into #study-type-chart by
+   renderStudyTypeChart() in static/js/main.js from window.GALENOS_STUDY_TYPES;
+   the table below carries the same figures. Expects `study_types`
+   (db.get_study_type_counts). #}
+{% set grand_total = study_types | sum(attribute="total") %}
+{% set n_grey = study_types | sum(attribute="grey") %}
+{% if grand_total %}
+<div id="study-type-chart" class="chart" role="img"
+     aria-label="Papers by study type, split into published and grey literature; the same figures are in the table below."></div>
+<details class="table-toggle">
+  <summary>Show as table</summary>
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr><th>Study type</th><th class="num">Published</th><th class="num">Grey literature</th><th class="num">Total</th><th class="num">Share</th></tr>
+      </thead>
+      <tbody>
+        {% for row in study_types %}
+        <tr>
+          <td>{{ row.label }} <span class="muted">&middot; {{ row.family }}</span></td>
+          <td class="num">{{ "{:,}".format(row.published) }}</td>
+          <td class="num">{{ "{:,}".format(row.grey) }}</td>
+          <td class="num">{{ "{:,}".format(row.total) }}</td>
+          <td class="num">{{ "%.1f"|format(100 * row.total / grand_total) }}%</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr><td>All papers</td>
+          <td class="num">{{ "{:,}".format(study_types | sum(attribute="published")) }}</td>
+          <td class="num">{{ "{:,}".format(n_grey) }} ({{ "%.0f"|format(100 * n_grey / grand_total) }}%)</td>
+          <td class="num">{{ "{:,}".format(grand_total) }}</td><td class="num">100%</td></tr>
+      </tfoot>
+    </table>
+  </div>
+</details>
+{% else %}
+<p class="empty-state">No papers to show.</p>
+{% endif %}
