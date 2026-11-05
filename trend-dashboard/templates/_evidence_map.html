@@ -1,0 +1,45 @@
+{# Topic evidence map: the bubble chart is drawn into #evidence-map-chart by
+   renderEvidenceMap() in static/js/main.js from window.GALENOS_EVIDENCE_MAP;
+   the table below gives each trending topic's full study-type profile.
+   Expects `evidence_map` (db.get_topic_evidence) and `study_types`
+   (db.get_study_type_counts, used for the column order and labels). #}
+{% set short = {
+  "interventional": "Trials", "observational": "Observ.", "qualitative": "Qualit.",
+  "case_report": "Case rep.", "animal": "Animal", "in_vitro": "In vitro",
+  "systematic_review": "Syst. rev.", "other_review": "Other rev.",
+  "protocol": "Protocol", "other": "Other"} %}
+{% set types = study_types | selectattr("code") | list %}
+{% set trending = evidence_map | selectattr("is_trendy") | list %}
+{% if evidence_map %}
+<div id="evidence-map-chart" class="chart chart--map" role="img"
+     aria-label="Bubble chart of topics by share of trials and systematic reviews (horizontal) and share of pre-clinical studies (vertical); the trending topics' figures are in the table below."></div>
+<details class="table-toggle">
+  <summary>Show trending topics as a table</summary>
+  <p class="panel__hint table-toggle__hint">Share of each trending topic's papers by study type. Click a column heading to sort.</p>
+  <div class="table-scroll">
+    <table class="data-table data-table--heat" data-sortable>
+      <thead>
+        <tr>
+          <th data-sort="text">Topic</th>
+          <th class="num" data-sort="num">Papers</th>
+          {% for t in types %}<th class="num" data-sort="num" title="{{ t.label }} ({{ t.family }})">{{ short.get(t.code, t.label) }}</th>{% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for topic in trending %}
+        <tr>
+          <td><a href="{{ url_for('topic_detail', topic_id=topic.topic_id) }}">{{ topic.name }}</a></td>
+          <td class="num" data-value="{{ topic.n_classified }}">{{ "{:,}".format(topic.n_classified) }}</td>
+          {% for t in types %}
+          {% set share = topic.counts[t.code] / topic.n_classified %}
+          <td class="num heat" data-value="{{ share }}" style="--heat: {{ '%.3f' | format(share) }}">{{ "%.0f" | format(100 * share) }}%</td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+{% else %}
+<p class="empty-state">No topics with classified papers yet.</p>
+{% endif %}
