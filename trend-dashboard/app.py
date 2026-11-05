@@ -26,6 +26,7 @@ def create_app():
             topics=topics,
             trendy_topics=trendy_topics[:12],
             default_topic_ids=default_ids,
+            study_types=db.get_study_type_counts(conn),
         )
 
     @app.route("/topic/<int:topic_id>")
@@ -36,7 +37,9 @@ def create_app():
             abort(404)
         timeline = db.get_topic_timeline(conn, topic_id)
         history = db.get_topic_history(conn, topic["lineage_id"])
-        return render_template("topic.html", topic=topic, timeline=timeline, history=history)
+        study_types = db.get_study_type_counts(conn, topic_id)
+        return render_template("topic.html", topic=topic, timeline=timeline, history=history,
+                               study_types=study_types)
 
     @app.route("/topic/<int:topic_id>/month/<int:year>/<int:month>")
     def topic_month(topic_id, year, month):

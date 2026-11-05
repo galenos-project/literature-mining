@@ -120,6 +120,63 @@ def get_paper_scatter(db):
     return out
 
 
+# Study types assigned by the pipeline (StudyType codes), in display order,
+# with their display label and family. Codes not listed here (e.g. from an
+# older category list) are counted as "other".
+STUDY_TYPES = [
+    ("interventional", "Interventional (trials)", "Human research"),
+    ("observational", "Observational", "Human research"),
+    ("qualitative", "Qualitative", "Human research"),
+    ("case_report", "Case report / series", "Human research"),
+    ("animal", "Animal", "Pre-clinical"),
+    ("in_vitro", "In vitro / molecular", "Pre-clinical"),
+    ("systematic_review", "Systematic review / meta-analysis", "Reviews"),
+    ("other_review", "Other review", "Reviews"),
+    ("protocol", "Study protocol", "Other"),
+    ("other", "Other / non-research", "Other"),
+]
+
+
+def get_study_type_counts(db, topic_id=None):
+    """Paper counts per study type -- for the whole corpus, or for the papers
+    assigned to one topic -- each split into published / grey literature /
+    not recorded. One dict per study type in STUDY_TYPES order, plus a
+    trailing "Not yet classified" row only if some papers have no label."""
+    if topic_id is None:
+        rows = db.execute(
+            "SELECT study_type, grey_literature, COUNT(*) AS n FROM papers GROUP BY study_type, grey_literature"
+        ).fetchall()
+    else:
+        rows = db.execute(
+            """
+            SELECT p.study_type, p.grey_literature, COUNT(*) AS n
+            FROM paper_topics pt JOIN papers p ON p.paper_id = pt.paper_id
+            WHERE pt.topic_id = ?
+            GROUP BY p.study_type, p.grey_literature
+            """,
+            (topic_id,),
+        ).fetchall()
+
+    known = {code for code, _, _ in STUDY_TYPES}
+    counts = {}
+    for r in rows:
+        code = r["study_type"]
+        if code is not None and code not in known:
+            code = "other"
+        split = counts.setdefault(code, {"published": 0, "grey": 0, "unrecorded": 0})
+        key = {0: "published", 1: "grey"}.get(r["grey_literature"], "unrecorded")
+        split[key] += r["n"]
+
+    rows_out = list(STUDY_TYPES)
+    if None in counts:
+        rows_out.append((None, "Not yet classified", "Unclassified"))
+    out = []
+    for code, label, family in rows_out:
+        split = counts.get(code, {"published": 0, "grey": 0, "unrecorded": 0})
+        out.append({"code": code, "label": label, "family": family, **split, "total": sum(split.values())})
+    return out
+
+
 def get_corpus_stats(db):
     n_topics = db.execute("SELECT COUNT(*) AS c FROM topics").fetchone()["c"]
     n_trendy = db.execute("SELECT COUNT(*) AS c FROM topics WHERE is_trendy = 1").fetchone()["c"]

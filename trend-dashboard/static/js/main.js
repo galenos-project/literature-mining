@@ -67,6 +67,78 @@
 
   const PLOTLY_CONFIG = { displayModeBar: false, responsive: true };
 
+  // ---- Study-type breakdown (index + topic pages) -------------------------
+
+  // Validated pair (dataviz validate_palette.js, light, on #FFFFFF): published
+  // takes a higher-chroma step of the site teal, grey literature a violet --
+  // not amber, which means "predicted" elsewhere on the site.
+  const STUDY_TYPE_SERIES = [
+    { key: "published", name: "Published", color: "#00897B" },
+    { key: "grey", name: "Grey literature", color: "#7B5FC4" },
+    { key: "unrecorded", name: "Venue not recorded", color: "#B7BBC2" },
+  ];
+
+  // Horizontal bars, one per study type grouped by family, each split into
+  // published / grey literature, with the type's share of all papers at the
+  // bar tip. `rows` comes from db.get_study_type_counts.
+  function renderStudyTypeChart(elId, rows) {
+    const el = document.getElementById(elId);
+    if (!el || !rows || !rows.length) return;
+    const grandTotal = rows.reduce((sum, r) => sum + r.total, 0);
+    const pct = (n, of) => (of ? (100 * n / of).toFixed(of >= 1000 ? 1 : 0) : "0") + "%";
+    const y = [rows.map((r) => r.family), rows.map((r) => r.label)];
+
+    const traces = STUDY_TYPE_SERIES
+      .filter((s) => s.key !== "unrecorded" || rows.some((r) => r.unrecorded > 0))
+      .map((s) => ({
+        type: "bar",
+        orientation: "h",
+        name: s.name,
+        x: rows.map((r) => r[s.key]),
+        y,
+        marker: { color: s.color, line: { color: "#FFFFFF", width: 2 } },
+        customdata: rows.map((r) => [r.label, pct(r[s.key], r.total), r.total.toLocaleString()]),
+        hovertemplate:
+          `<b>%{customdata[0]}</b><br>${s.name}: %{x:,} (%{customdata[1]} of this type)` +
+          "<br>All: %{customdata[2]}<extra></extra>",
+      }));
+
+    const maxTotal = Math.max(...rows.map((r) => r.total));
+    const annotations = rows.map((r) => ({
+      x: r.total,
+      y: [r.family, r.label],
+      text: pct(r.total, grandTotal),
+      xanchor: "left",
+      xshift: 6,
+      showarrow: false,
+      font: { family: "Inter, sans-serif", size: 12, color: "#3D4457" },
+    }));
+
+    Plotly.newPlot(
+      elId,
+      traces,
+      baseLayout({
+        barmode: "stack",
+        bargap: 0.38,
+        barcornerradius: 4,
+        height: 120 + rows.length * 34,
+        margin: { t: 30, r: 60, b: 40, l: 10 },
+        legend: { orientation: "h", x: 0, y: 1.02, yanchor: "bottom", traceorder: "normal" },
+        xaxis: {
+          title: "Papers",
+          gridcolor: "#E8EAED",
+          zeroline: false,
+          rangemode: "tozero",
+          range: [0, maxTotal * 1.12],
+          tickformat: maxTotal >= 10000 ? "~s" : ",d",
+        },
+        yaxis: { autorange: "reversed", automargin: true, tickfont: { color: "#1B2233" } },
+        annotations,
+      }),
+      PLOTLY_CONFIG
+    );
+  }
+
   // ---- Index page --------------------------------------------------------
 
   function initIndexPage() {
@@ -555,5 +627,6 @@
     } else {
       initIndexPage();
     }
+    renderStudyTypeChart("study-type-chart", window.GALENOS_STUDY_TYPES);
   });
 })();

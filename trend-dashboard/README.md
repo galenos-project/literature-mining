@@ -111,6 +111,7 @@ reload the live database.
 pip install -r requirements-pipeline.txt   
 # keys go in trend-dashboard/.env (gitignored; already-exported variables win):
 #   OPENALEX_API_KEY=...  OPENALEX_MAILTO=you@example.org  OPENAI_API_KEY=...
+#   LLM_MODEL=Qwen/Qwen3-Next-80B-A3B-Instruct   (optional DeepInfra model id; this is the default)
 
 python scripts/update_data_monthly.py --data-dir pipeline_data
 ```

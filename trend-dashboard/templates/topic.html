@@ -28,13 +28,22 @@
 
 <section class="panel panel--spaced">
   <div class="panel__head">
+    <h2>Study types</h2>
+    <p class="panel__hint">All papers assigned to this topic, by study design, split into published and grey literature
+      (preprints, theses, conference abstracts). Study designs are classified automatically from the abstract.</p>
+  </div>
+  {% include "_study_types.html" %}
+</section>
+
+<section class="panel panel--spaced">
+  <div class="panel__head">
     <h2>History</h2>
     <p class="panel__hint">This topic in each monthly update. Topics are re-derived every month; a topic is
       linked to the previous month's when most of its keywords and papers carry over (scores in the last column).</p>
   </div>
   {% if history|length > 1 %}
   <div class="table-scroll">
-    <table class="history-table">
+    <table class="data-table">
       <thead>
         <tr>
           <th>Update</th><th>Name</th><th>Trendiness</th><th class="num">Papers</th><th>Carried over from previous month</th>
@@ -69,6 +78,7 @@
 <script>
   window.GALENOS_TOPIC = {{ topic | tojson }};
   window.GALENOS_TIMELINE = {{ timeline | tojson }};
+  window.GALENOS_STUDY_TYPES = {{ study_types | tojson }};
   window.GALENOS = { urls: { monthPage: "/topic/__ID__/month/__YEAR__/__MONTH__" } };
 </script>
 {% endblock %}

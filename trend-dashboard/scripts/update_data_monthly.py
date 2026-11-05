@@ -38,6 +38,7 @@ import argparse
 import math
 import os
 import re
+import sys
 import time
 from datetime import date, datetime, timedelta
 
@@ -369,7 +370,8 @@ def merge_papers(existing_df, new_rows):
 # after the first full pass only new or edited papers are sent to the LLM.
 # ==========================================================================
 
-LLM_MODEL = "Qwen/Qwen3-Next-80B-A3B-Instruct" #"meta-llama/Llama-3.3-70B-Instruct"
+# DeepInfra model id, e.g. "meta-llama/Llama-3.3-70B-Instruct". Set LLM_MODEL in .env to change it.
+LLM_MODEL = os.environ.get("LLM_MODEL") or "Qwen/Qwen3-Next-80B-A3B-Instruct"
 LLM_SYSTEM_MSG = "You are a helpful expert assistant for working with topics from the scientific literature in the field of mental health."
 STUDY_TYPE_WORKERS = 16  # concurrent LLM requests
 
@@ -1352,6 +1354,9 @@ def reload_database(paths):
 
 
 def main():
+    # Flush each line even when output is piped (e.g. into tee), so progress
+    # shows up in the terminal and log during a long run, not only at the end.
+    sys.stdout.reconfigure(line_buffering=True)
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default=os.path.join(BASE_DIR, "pipeline_data"),
                          help="where the pipeline's CSVs are read from/written to")
