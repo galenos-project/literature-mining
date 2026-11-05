@@ -1180,7 +1180,9 @@ def run_pipeline(data_dir, since=None, skip_fetch=False, skip_topic_model=False,
         # whole window has been fetched, so an interrupted run never leaves
         # a half-refreshed corpus behind -- re-running resumes from the
         # staging file's newest PubDate instead.
-        staged = pd.read_csv(staging_path) if os.path.exists(staging_path) else pd.DataFrame()
+        # (an empty file, e.g. from a run that failed before fetching anything, means nothing to resume)
+        staged = (pd.read_csv(staging_path) if os.path.exists(staging_path) and os.path.getsize(staging_path) > 1
+                  else pd.DataFrame())
         if not staged.empty:
             print(f"  resuming the interrupted fetch in {staging_path} ({len(staged)} papers so far)")
         since_date = since or latest_pub_date(staged) or window[0]
@@ -1188,7 +1190,8 @@ def run_pipeline(data_dir, since=None, skip_fetch=False, skip_topic_model=False,
         new_rows, resume_date, fetch_complete = fetch_papers(since_date, window[1])
         print(f"  fetched {len(new_rows)} paper(s) this run")
         staged = merge_papers(staged, new_rows)
-        staged.to_csv(staging_path, index=False)  # save progress BEFORE deciding whether to continue
+        if not staged.empty:
+            staged.to_csv(staging_path, index=False)  # save progress BEFORE deciding whether to continue
 
         if not fetch_complete:
             print()
@@ -1215,7 +1218,8 @@ def run_pipeline(data_dir, since=None, skip_fetch=False, skip_topic_model=False,
                 f"{papers_path} and re-run with --skip-fetch if the drop is genuine."
             )
         papers_df.to_csv(papers_path, index=False)
-        os.remove(staging_path)
+        if os.path.exists(staging_path):
+            os.remove(staging_path)
         print(f"  corpus now has {len(papers_df)} papers total")
 
         if fetch_only:

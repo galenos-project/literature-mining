@@ -7,6 +7,7 @@ __pycache__/
 .venv/
 venv/
 env/
+.env
 
 # trend-dashboard: generated database and pipeline working data
 # (rebuilt by scripts/init_db.py, generate_sample_data.py, and
