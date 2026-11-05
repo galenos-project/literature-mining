@@ -367,6 +367,22 @@ def load_paper_topics(conn, path, populate_papers=False):
     print(f"  paper-topic links loaded from {path} ({n_links} links{extra})")
 
 
+def build_topic_study_types(conn):
+    """Rebuild the derived topic_study_types table (papers per study type per
+    topic) from paper_topics and papers."""
+    conn.execute("DELETE FROM topic_study_types")
+    conn.execute(
+        """
+        INSERT INTO topic_study_types (topic_id, study_type, n_papers)
+        SELECT pt.topic_id, p.study_type, COUNT(*)
+        FROM paper_topics pt JOIN papers p ON p.paper_id = pt.paper_id
+        GROUP BY pt.topic_id, p.study_type
+        """
+    )
+    n = conn.execute("SELECT COUNT(DISTINCT topic_id) FROM topic_study_types").fetchone()[0]
+    print(f"  topic study-type counts rebuilt ({n} topics)")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--papers", help="search-results CSV: PaperId,PaperTitle,Citations,coFoS,Authors,Abstract,Lang,PubYear,PubDate")
@@ -405,6 +421,9 @@ def main():
 
     if args.history_dir:
         load_history(conn, args.history_dir)
+
+    # Always rebuilt, so running this script with no arguments refreshes it.
+    build_topic_study_types(conn)
 
     conn.commit()
     conn.close()

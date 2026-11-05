@@ -14,7 +14,10 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DB_PATH = os.path.join(BASE_DIR, "data", "galenos.db")
 SCHEMA_PATH = os.path.join(BASE_DIR, "schema.sql")
 
-TABLES = ["paper_topics", "papers", "monthly_counts", "topics", "topic_history"]
+# topic_paper_samples is no longer created (the old paper-landscape scatter);
+# it stays here so --reset drops it from databases built before.
+TABLES = ["paper_topics", "papers", "monthly_counts", "topics", "topic_history",
+          "topic_study_types", "topic_paper_samples"]
 
 
 def main():

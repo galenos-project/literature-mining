@@ -27,6 +27,7 @@ def create_app():
             trendy_topics=trendy_topics[:12],
             default_topic_ids=default_ids,
             study_types=db.get_study_type_counts(conn),
+            evidence_map=db.get_topic_evidence(conn),
         )
 
     @app.route("/topic/<int:topic_id>")
@@ -71,11 +72,6 @@ def create_app():
         if topic is None:
             abort(404)
         return jsonify({"topic": topic, "timeline": db.get_topic_timeline(conn, topic_id)})
-
-    @app.route("/api/paper-scatter")
-    def api_paper_scatter():
-        conn = db.get_db()
-        return jsonify(db.get_paper_scatter(conn))
 
     @app.errorhandler(404)
     def not_found(e):

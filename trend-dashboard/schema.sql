@@ -53,6 +53,9 @@ CREATE TABLE IF NOT EXISTS papers (
     source_name       TEXT                -- from SourceName: journal / repository the paper appeared in
 );
 CREATE INDEX IF NOT EXISTS idx_papers_pubdate ON papers(publication_date);
+-- Covering index for the study-type counts on the home page (avoids scanning
+-- the whole papers table, abstracts and all).
+CREATE INDEX IF NOT EXISTS idx_papers_study_type ON papers(study_type, grey_literature);
 
 -- Many-to-many: which topics a paper is flagged for, melted from the
 -- paper-topic assignment file's binary Topic0..TopicN columns.
@@ -89,18 +92,14 @@ CREATE TABLE IF NOT EXISTS topic_history (
     PRIMARY KEY (lineage_id, run_month)
 );
 
--- Derived data (NOT imported from source files): a small sample of papers
--- per topic with 2D text-embedding coordinates, computed locally by
--- scripts/compute_embeddings.py, used for the front-page scatter plot.
--- A paper can appear more than once here if it's sampled under more than
--- one topic it's assigned to; its (embed_x, embed_y) will be identical
--- across those rows, since the coordinate is a property of the paper's
--- text, not of the topic.
-CREATE TABLE IF NOT EXISTS topic_paper_samples (
-    topic_id  INTEGER NOT NULL REFERENCES topics(topic_id),
-    paper_id  TEXT NOT NULL REFERENCES papers(paper_id),
-    embed_x   REAL NOT NULL,
-    embed_y   REAL NOT NULL,
-    PRIMARY KEY (topic_id, paper_id)
+-- Derived data (NOT imported from source files): the number of papers of
+-- each study type assigned to each topic, rebuilt by
+-- scripts/import_notebook_outputs.py after every import (aggregating
+-- paper_topics x papers live takes seconds). Used for the front-page topic
+-- evidence map. study_type is NULL for papers not yet classified.
+CREATE TABLE IF NOT EXISTS topic_study_types (
+    topic_id    INTEGER NOT NULL REFERENCES topics(topic_id),
+    study_type  TEXT,
+    n_papers    INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_topic_paper_samples_topic ON topic_paper_samples(topic_id);
+CREATE INDEX IF NOT EXISTS idx_topic_study_types_topic ON topic_study_types(topic_id);

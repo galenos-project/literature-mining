@@ -10,9 +10,10 @@ GRU time-series model &rarr; trendiness ranking.
 
 - **Front page** — corpus stats, a "trending now" ticker, a multi-line
   chart of the top trending topics' mentions over the last 10 years, a
-  topic explorer with actual-vs-predicted timelines, and a paper-landscape
-  scatter plot (a sample of papers per topic, positioned by text
-  similarity; trending topics in colour, established topics in grey).
+  topic explorer with actual-vs-predicted timelines, a breakdown of all
+  papers by study type, and a topic evidence map (one bubble per topic,
+  placed by its share of trials/systematic reviews and of pre-clinical
+  studies; trending topics in red).
 - **Topic explorer** — pick any topic from a dropdown to see its full
   monthly timeline (actual mentions vs the model's predicted mentions,
   matching the blue/orange convention in the paper's figures).
@@ -26,7 +27,6 @@ GRU time-series model &rarr; trendiness ranking.
 pip install -r requirements.txt
 python scripts/init_db.py --reset
 python scripts/generate_sample_data.py
-python scripts/compute_embeddings.py
 python app.py
 ```
 
@@ -73,31 +73,16 @@ file at a time as your pipeline output changes.
   uses a different starting point, adjust `align_predicted_months()` in
   `scripts/import_notebook_outputs.py`.
 
-### The paper-landscape scatter plot
+### The topic evidence map
 
-No embeddings were saved by the original pipeline, so this dashboard
-computes its own: `scripts/compute_embeddings.py` samples ~5 papers per
-topic, embeds each paper's title + abstract with the `all-MiniLM-L6-v2`
-sentence-transformer, projects those to 2D with UMAP (one shared
-projection, so every topic's points land in the same comparable space),
-and stores the result in `topic_paper_samples`. The first run downloads
-the ~90 MB model; embedding a few thousand papers on CPU takes a couple
-of minutes.
-
-How tightly a topic's papers group in the plot is controlled by the UMAP
-parameters, exposed as flags: `--n-neighbors` (lower ⇒ tighter, more
-separated clusters), `--min-dist` (near 0.0 ⇒ dense clumps), `--metric`,
-plus `--samples-per-topic` and `--seed`.
-
-Run it any time after `--papers` and `--paper-topics` have been loaded:
-
-```bash
-python scripts/compute_embeddings.py --samples-per-topic 15 --n-neighbors 10 --min-dist 0.0
-```
-
-It's independent of the other import steps and safe to re-run (it clears
-and rebuilds `topic_paper_samples` each time), so re-run it whenever the
-underlying papers/topic assignments change.
+The front page's evidence map plots each topic (with at least 50 classified
+papers, `EVIDENCE_MAP_MIN_PAPERS` in `db.py`) by the share of its papers
+that are trials or systematic reviews (x) and pre-clinical studies (y),
+sized by papers; its table view lists every trending topic's full
+study-type profile. It reads `topic_study_types`, a small derived table of
+papers per study type per topic that `import_notebook_outputs.py` rebuilds
+at the end of every import (running it with no arguments just rebuilds
+that table).
 
 ## Monthly batch updates
 
@@ -127,8 +112,8 @@ have rolled out of the window are dropped. The refetch goes to
 `pipeline_data/papers_fetching.csv` and only replaces `papers.csv` once
 complete (an interrupted run resumes from it automatically), and it's
 refused if the corpus would shrink by more than 5%. The run then
-refits everything, and does a full `init_db.py --reset` + reimport +
-`compute_embeddings.py` (topic ids aren't stable across a full-corpus
+refits everything, and does a full `init_db.py --reset` + reimport
+(topic ids aren't stable across a full-corpus
 refit, so this is a full rebuild each run, not an incremental patch).
 
 ### Study type and grey literature
@@ -195,7 +180,6 @@ scripts/
   init_db.py                    Create/reset the database
   generate_sample_data.py       Synthetic demo dataset
   import_notebook_outputs.py    Template loader for real exports
-  compute_embeddings.py          Derives the scatter-plot sample + 2D layout
 templates/                      Jinja2 pages (base, index, topic, month, 404)
 static/css/style.css            Design system
 static/js/main.js               Plotly charts + dropdown + click-through

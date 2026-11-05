@@ -22,7 +22,7 @@ updated/created dates needs a paid plan). Papers that fall out of the
 window are dropped.
 
 ...then writes all five CSVs to --data-dir and does a full
-init_db --reset + import_notebook_outputs.py + compute_embeddings.py refresh
+init_db --reset + import_notebook_outputs.py refresh
 of the live database (topic ids aren't stable across a full-corpus refit, so
 this is a full rebuild each run, not an incremental patch; continuity across
 runs is carried by the LineageIds archived under --data-dir/history/).
@@ -1348,7 +1348,6 @@ def reload_database(paths):
         ],
         check=True,
     )
-    subprocess.run(["python3", os.path.join(scripts_dir, "compute_embeddings.py")], check=True)
     print("Database reloaded.")
 
 

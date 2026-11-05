@@ -102,24 +102,6 @@ def get_papers_for_topic_month(db, topic_id, year, month):
     return [dict(r) for r in rows]
 
 
-def get_paper_scatter(db):
-    rows = db.execute(
-        """
-        SELECT tps.topic_id, t.name AS topic_name, t.is_trendy,
-               tps.paper_id, p.title, tps.embed_x, tps.embed_y
-        FROM topic_paper_samples tps
-        JOIN topics t ON t.topic_id = tps.topic_id
-        JOIN papers p ON p.paper_id = tps.paper_id
-        """
-    ).fetchall()
-    out = []
-    for r in rows:
-        d = dict(r)
-        d["is_trendy"] = bool(d["is_trendy"])
-        out.append(d)
-    return out
-
-
 # Study types assigned by the pipeline (StudyType codes), in display order,
 # with their display label and family. Codes not listed here (e.g. from an
 # older category list) are counted as "other".
@@ -174,6 +156,46 @@ def get_study_type_counts(db, topic_id=None):
     for code, label, family in rows_out:
         split = counts.get(code, {"published": 0, "grey": 0, "unrecorded": 0})
         out.append({"code": code, "label": label, "family": family, **split, "total": sum(split.values())})
+    return out
+
+
+# Topics with fewer papers than this are left off the evidence map: their
+# study-type shares are too noisy to place meaningfully.
+EVIDENCE_MAP_MIN_PAPERS = 50
+
+
+def get_topic_evidence(db, min_papers=EVIDENCE_MAP_MIN_PAPERS):
+    """Study-type profile of each topic, for the topic evidence map: one dict
+    per topic with at least `min_papers` classified papers, with `counts`
+    {study_type code: papers} over STUDY_TYPES (unknown codes counted as
+    "other"; unclassified papers left out) and `n_classified` their sum.
+    Reads the precomputed topic_study_types table."""
+    known = {code for code, _, _ in STUDY_TYPES}
+    rows = db.execute(
+        """
+        SELECT t.topic_id, t.name, t.is_trendy, t.trend_rank, tst.study_type, tst.n_papers
+        FROM topic_study_types tst JOIN topics t ON t.topic_id = tst.topic_id
+        WHERE tst.study_type IS NOT NULL
+        """
+    ).fetchall()
+    topics = {}
+    for r in rows:
+        t = topics.setdefault(r["topic_id"], {
+            "topic_id": r["topic_id"],
+            "name": r["name"],
+            "is_trendy": bool(r["is_trendy"]),
+            "trend_rank": r["trend_rank"],
+            "counts": {code: 0 for code, _, _ in STUDY_TYPES},
+        })
+        code = r["study_type"] if r["study_type"] in known else "other"
+        t["counts"][code] += r["n_papers"]
+    out = []
+    for t in topics.values():
+        t["n_classified"] = sum(t["counts"].values())
+        if t["n_classified"] >= min_papers:
+            out.append(t)
+    # Trending topics first, by trendiness; then the rest by size.
+    out.sort(key=lambda t: (not t["is_trendy"], -(t["trend_rank"] or 0), -t["n_classified"]))
     return out
 
 

@@ -658,6 +658,22 @@ a:focus-visible, select:focus-visible, button:focus-visible {
 .table-toggle { margin-top: 0.5rem; font-size: 0.85rem; }
 .table-toggle summary { cursor: pointer; color: var(--teal); }
 .table-toggle .table-scroll { margin-top: 0.6rem; }
+.table-toggle__hint { margin-top: 0.5rem; }
+
+.chart--map { min-height: 560px; }
+
+/* Heat-shaded share cells: --heat is the cell's share (0..1). */
+.data-table--heat td.heat {
+  background: color-mix(in srgb, var(--teal) calc(var(--heat) * 60%), transparent);
+  white-space: nowrap;
+  padding-left: 0.5rem;
+  padding-right: 0.5rem;
+}
+.data-table--heat th.num { padding-left: 0.5rem; padding-right: 0.5rem; white-space: nowrap; }
+.data-table th.sortable { cursor: pointer; user-select: none; }
+.data-table th.sortable:hover { color: var(--ink); }
+.data-table th[aria-sort="descending"]::after { content: " \25BE"; }
+.data-table th[aria-sort="ascending"]::after { content: " \25B4"; }
 
 .empty-state {
   color: var(--muted);

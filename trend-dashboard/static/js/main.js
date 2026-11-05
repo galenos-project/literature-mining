@@ -139,6 +139,151 @@
     );
   }
 
+  // ---- Topic evidence map (index page) ------------------------------------
+
+  const EVIDENCE_COLORS = { trending: "#B5423A", established: "#B7BBC2" };
+  const EVIDENCE_LABELS_PER_AXIS = 3;
+
+  function truncate(s, n) {
+    return s.length > n ? s.slice(0, n - 1).trimEnd() + "\u2026" : s;
+  }
+
+  // One bubble per topic: x = share of trials + systematic reviews, y = share
+  // of pre-clinical (animal + in vitro) studies, area = papers. Established
+  // topics sit behind in grey; the trending topics furthest along each axis
+  // are labelled. `topics` comes from db.get_topic_evidence.
+  function renderEvidenceMap(elId, topics) {
+    const el = document.getElementById(elId);
+    if (!el || !topics || !topics.length) return;
+    const pts = topics.map((t) => {
+      const c = t.counts, n = t.n_classified;
+      const share = (k) => c[k] / n;
+      return {
+        t,
+        x: share("interventional") + share("systematic_review"),
+        y: share("animal") + share("in_vitro"),
+        detail: [
+          ["Trials", share("interventional")],
+          ["Systematic reviews", share("systematic_review")],
+          ["Observational", share("observational")],
+          ["Qualitative", share("qualitative")],
+          ["Case reports", share("case_report")],
+          ["Pre-clinical", share("animal") + share("in_vitro")],
+          ["Other reviews", share("other_review")],
+          ["Protocols / other", share("protocol") + share("other")],
+        ],
+      };
+    });
+    const maxN = Math.max(...topics.map((t) => t.n_classified));
+    const MAX_DIAMETER = 34;
+    const sizeref = (2 * maxN) / (MAX_DIAMETER * MAX_DIAMETER);
+    const pctf = (v) => (100 * v).toFixed(0) + "%";
+
+    const trace = (group, isTrendy) => ({
+      type: "scatter",
+      mode: "markers",
+      name: isTrendy ? "Trending topic" : "Other topic",
+      x: group.map((p) => p.x),
+      y: group.map((p) => p.y),
+      customdata: group.map((p) => p.t.topic_id),
+      text: group.map((p) =>
+        `<b>${escapeHtml(p.t.name)}</b><br>${p.t.n_classified.toLocaleString()} papers` +
+        (isTrendy ? " \u00b7 trending" : "") + "<br>" +
+        p.detail.map(([k, v]) => `${k}: ${pctf(v)}`).join("<br>")
+      ),
+      hovertemplate: "%{text}<extra></extra>",
+      marker: {
+        size: group.map((p) => p.t.n_classified),
+        sizemode: "area",
+        sizeref,
+        sizemin: 4,
+        color: isTrendy ? EVIDENCE_COLORS.trending : EVIDENCE_COLORS.established,
+        opacity: isTrendy ? 0.78 : 0.5,
+        line: { color: "#FFFFFF", width: isTrendy ? 1.5 : 1 },
+      },
+    });
+    const trending = pts.filter((p) => p.t.is_trendy);
+    const established = pts.filter((p) => !p.t.is_trendy);
+
+    // Label the trending topics furthest right and furthest up.
+    // Those furthest right sit near the bottom edge, so their labels stack
+    // upwards to the left; those furthest up stack downwards to the right.
+    const pick = (key) => [...trending].sort((a, b) => b[key] - a[key]).slice(0, EVIDENCE_LABELS_PER_AXIS);
+    const byX = pick("x");
+    const byY = pick("y").filter((p) => !byX.includes(p));
+    const xMax = Math.min(1, Math.max(...pts.map((p) => p.x)) * 1.08 + 0.02);
+    const yMax = Math.min(1, Math.max(...pts.map((p) => p.y)) * 1.05 + 0.03);
+    const label = (p, ax, ay, xanchor) => ({
+      x: p.x, y: p.y, text: escapeHtml(truncate(p.t.name, 48)),
+      showarrow: true, arrowhead: 0, arrowwidth: 1, arrowcolor: "#6B7280",
+      ax, ay, xanchor, yanchor: "middle",
+      font: { family: "Inter, sans-serif", size: 11, color: "#1B2233" },
+      bgcolor: "rgba(255,255,255,0.9)",
+    });
+    const annotations = [
+      ...[...byX].sort((a, b) => a.x - b.x).map((p, i) => label(p, -30, -45 - i * 26, "right")),
+      ...[...byY].sort((a, b) => b.y - a.y).map((p, i) => label(p, 40, -6 + i * 26, "left")),
+    ];
+
+    Plotly.newPlot(
+      elId,
+      [trace(established, false), trace(trending, true)],
+      baseLayout({
+        height: 560,
+        margin: { t: 30, r: 20, b: 55, l: 65 },
+        legend: { orientation: "h", x: 0, y: 1.02, yanchor: "bottom", traceorder: "reversed", itemsizing: "constant" },
+        xaxis: {
+          title: "Trials and systematic reviews (share of the topic's papers)",
+          tickformat: ".0%", range: [-0.01, xMax], gridcolor: "#E8EAED", zeroline: false,
+        },
+        yaxis: {
+          title: "Pre-clinical studies (share)",
+          tickformat: ".0%", range: [-0.02, yMax], gridcolor: "#E8EAED", zeroline: false,
+        },
+        annotations,
+      }),
+      PLOTLY_CONFIG
+    );
+    el.on("plotly_click", (data) => {
+      const id = data.points[0].customdata;
+      window.location.href = fillUrl(window.GALENOS.urls.topicPage, { ID: id });
+    });
+  }
+
+  // Click-to-sort for tables marked data-sortable: header cells carry
+  // data-sort="text" | "num"; numeric cells may carry data-value.
+  function initSortableTables() {
+    document.querySelectorAll("table[data-sortable]").forEach((table) => {
+      const headers = [...table.tHead.rows[0].cells];
+      headers.forEach((th, col) => {
+        if (!th.dataset.sort) return;
+        th.classList.add("sortable");
+        th.tabIndex = 0;
+        const sort = () => {
+          const numeric = th.dataset.sort === "num";
+          // First click: numbers high-to-low, text A-Z; further clicks toggle.
+          const current = th.getAttribute("aria-sort");
+          const desc = current ? current === "ascending" : numeric;
+          headers.forEach((h) => h.removeAttribute("aria-sort"));
+          th.setAttribute("aria-sort", desc ? "descending" : "ascending");
+          const body = table.tBodies[0];
+          const key = (row) => {
+            const cell = row.cells[col];
+            return numeric ? parseFloat(cell.dataset.value ?? cell.textContent) : cell.textContent.trim().toLowerCase();
+          };
+          const rows = [...body.rows].sort((a, b) => {
+            const ka = key(a), kb = key(b);
+            const cmp = ka < kb ? -1 : ka > kb ? 1 : 0;
+            return desc ? -cmp : cmp;
+          });
+          rows.forEach((r) => body.appendChild(r));
+        };
+        th.addEventListener("click", sort);
+        th.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sort(); } });
+      });
+    });
+  }
+
   // ---- Index page --------------------------------------------------------
 
   function initIndexPage() {
@@ -167,10 +312,6 @@
         selectedTopicIds = initialId != null && topicsById.has(initialId) ? [initialId] : [];
         renderSelectedTopics();
       });
-
-    fetch(urls.paperScatter)
-      .then((r) => r.json())
-      .then(renderPaperScatter);
 
     document.getElementById("topic-select").addEventListener("change", (e) => {
       if (e.target.value) addToSelection(e.target.value);
@@ -413,60 +554,6 @@
       });
     }
 
-    function renderPaperScatter(points) {
-      const traces = [];
-
-      const greyPoints = points.filter((p) => !p.is_trendy);
-      if (greyPoints.length) {
-        traces.push({
-          x: greyPoints.map((p) => p.embed_x),
-          y: greyPoints.map((p) => p.embed_y),
-          text: greyPoints.map((p) => `${p.title}<br><i>${p.topic_name}</i>`),
-          customdata: greyPoints.map((p) => p.topic_id),
-          mode: "markers",
-          name: "Established",
-          marker: { size: 7, color: "#B7BBC2", opacity: 0.65, line: { width: 0.5, color: "#F3F4F6" } },
-          hovertemplate: "%{text}<extra></extra>",
-        });
-      }
-
-      const trendyTopicIds = [...new Set(points.filter((p) => p.is_trendy).map((p) => p.topic_id))];
-      trendyTopicIds.forEach((tid, i) => {
-        const pts = points.filter((p) => p.topic_id === tid);
-        traces.push({
-          x: pts.map((p) => p.embed_x),
-          y: pts.map((p) => p.embed_y),
-          text: pts.map((p) => `${p.title}<br><i>${p.topic_name}</i>`),
-          customdata: pts.map((p) => p.topic_id),
-          mode: "markers",
-          name: pts[0].topic_name,
-          marker: {
-            size: 9,
-            color: LINE_PALETTE[i % LINE_PALETTE.length],
-            opacity: 0.9,
-            line: { width: 0.6, color: "#F3F4F6" },
-          },
-          hovertemplate: "%{text}<extra></extra>",
-        });
-      });
-
-      Plotly.newPlot(
-        "scatter-chart",
-        traces,
-        baseLayout({
-          xaxis: { visible: false },
-          yaxis: { visible: false, rangemode: "normal" },
-          legend: { orientation: "h", y: -0.18 },
-        }),
-        PLOTLY_CONFIG
-      );
-
-      document.getElementById("scatter-chart").on("plotly_click", (data) => {
-        const point = data.points[0];
-        window.location.href = fillUrl(urls.topicPage, { ID: point.customdata });
-      });
-    }
-
     // Rebuilds the chip bar and the stacked chart list from
     // `selectedTopicIds`. Called after any change to the selection.
     function renderSelectedTopics() {
@@ -626,7 +713,9 @@
       initTopicPage();
     } else {
       initIndexPage();
+      renderEvidenceMap("evidence-map-chart", window.GALENOS_EVIDENCE_MAP);
     }
     renderStudyTypeChart("study-type-chart", window.GALENOS_STUDY_TYPES);
+    initSortableTables();
   });
 })();

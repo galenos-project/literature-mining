@@ -103,12 +103,14 @@
   {% include "_study_types.html" %}
 </section>
 
-<section class="panel panel--scatter">
+<section class="panel panel--spaced">
   <div class="panel__head">
-    <h2>Paper landscape</h2>
-    <p class="panel__hint">~5 sampled papers per topic, positioned by text similarity. Trending topics are coloured; established topics are grey.</p>
+    <h2>Topic evidence map</h2>
+    <p class="panel__hint">Each bubble is a topic, sized by its number of papers and placed by the kind of evidence
+      behind it: further right, more trials and systematic reviews; higher up, more pre-clinical (animal and lab) work.
+      Topics in the lower left are mostly observational. Trending topics are in red. Click a bubble to open the topic.</p>
   </div>
-  <div id="scatter-chart" class="chart chart--tall"></div>
+  {% include "_evidence_map.html" %}
 </section>
 {% endblock %}
 
@@ -120,11 +122,11 @@
       topics: "{{ url_for('api_topics') }}",
       timeline: "/api/topics/__ID__/timeline",
       topicPage: "/topic/__ID__",
-      monthPage: "/topic/__ID__/month/__YEAR__/__MONTH__",
-      paperScatter: "{{ url_for('api_paper_scatter') }}"
+      monthPage: "/topic/__ID__/month/__YEAR__/__MONTH__"
     }
   };
   window.GALENOS_STUDY_TYPES = {{ study_types | tojson }};
+  window.GALENOS_EVIDENCE_MAP = {{ evidence_map | tojson }};
 </script>
 {% endblock %}
 
