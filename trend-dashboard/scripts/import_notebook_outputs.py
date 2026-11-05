@@ -286,8 +286,9 @@ def _insert_paper_row(conn, row):
     pub_date = normalize_pub_date(row.get("PubDate"), row.get("PubYear"))
     conn.execute(
         "INSERT OR REPLACE INTO papers "
-        "(paper_id, title, abstract, authors, publication_date, citations, fields_of_study, language, openalex_url) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(paper_id, title, abstract, authors, publication_date, citations, fields_of_study, language, openalex_url, "
+        " study_type, grey_literature, work_type, source_name) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             paper_id,
             (row.get("PaperTitle") or "").strip(),
@@ -298,6 +299,10 @@ def _insert_paper_row(conn, row):
             row.get("coFoS"),
             row.get("Lang"),
             guess_openalex_url(paper_id),
+            row.get("StudyType") or None,
+            int(parse_bool(row["GreyLiterature"])) if (row.get("GreyLiterature") or "").strip() else None,
+            row.get("WorkType") or None,
+            row.get("SourceName") or None,
         ),
     )
 

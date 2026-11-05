@@ -46,7 +46,11 @@ CREATE TABLE IF NOT EXISTS papers (
     citations         INTEGER,            -- from Citations
     fields_of_study   TEXT,               -- from coFoS
     language          TEXT,               -- from Lang
-    openalex_url      TEXT                -- derived from PaperId when it looks like an OpenAlex work id
+    openalex_url      TEXT,               -- derived from PaperId when it looks like an OpenAlex work id
+    study_type        TEXT,               -- from StudyType: the pipeline's LLM study-design label (NULL if absent)
+    grey_literature   INTEGER,            -- from GreyLiterature: 1 = preprint/thesis/conference/etc., 0 = published
+    work_type         TEXT,               -- from WorkType: OpenAlex work type (article, review, preprint, ...)
+    source_name       TEXT                -- from SourceName: journal / repository the paper appeared in
 );
 CREATE INDEX IF NOT EXISTS idx_papers_pubdate ON papers(publication_date);
 

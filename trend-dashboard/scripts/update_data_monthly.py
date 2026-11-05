@@ -2,14 +2,16 @@
 
 Replaces running the original notebooks by hand each month:
 
-  1. fetch_papers()               -- full OpenAlex refetch of the rolling corpus window
-  2. fit_topic_model()            -- BERTopic refit on the FULL corpus
-  3. build_paper_topic_matrix()   -- binary Topic0..N columns, thresholded
-  4. map_to_previous_run()        -- link topics to the previous run's (history/), inheriting names
-  5. name_topics()                -- LLM-based short names from keywords, for topics not carried over
-  6. build_monthly_mentions()     -- wide PubDate,Topic0,Topic1,... counts
-  7. fit_trend_model()            -- GRU walk-forward prediction + Trendy/RankSum
-  8. archive_run()                -- topics + assignments saved to history/<YYYY-MM>/
+  1. fetch_papers()               -- full OpenAlex refetch of the rolling corpus window, incl. a
+                                     GreyLiterature flag from OpenAlex's work type / venue metadata
+  2. classify_study_types()       -- LLM study-design label per paper, cached in study_types.csv
+  3. fit_topic_model()            -- BERTopic refit on the FULL corpus
+  4. build_paper_topic_matrix()   -- binary Topic0..N columns, thresholded
+  5. map_to_previous_run()        -- link topics to the previous run's (history/), inheriting names
+  6. name_topics()                -- LLM-based short names from keywords, for topics not carried over
+  7. build_monthly_mentions()     -- wide PubDate,Topic0,Topic1,... counts
+  8. fit_trend_model()            -- GRU walk-forward prediction + Trendy/RankSum
+  9. archive_run()                -- topics + assignments saved to history/<YYYY-MM>/
 
 The corpus is a rolling window of the CORPUS_WINDOW_MONTHS (120) complete
 calendar months before the current one, and it is refetched in full each
@@ -135,6 +137,29 @@ def restrict_to_window(df, window):
     return df[in_window].reset_index(drop=True)
 
 
+# Grey literature: work types that aren't peer-reviewed publications whatever
+# venue hosts them (conference abstracts/papers count as grey, as in Cochrane
+# guidance) -- and anything else not traceable to a journal or book venue.
+GREY_WORK_TYPES = {"preprint", "dissertation", "conference-abstract", "conference-paper", "report",
+                   "dataset", "supplementary-materials", "posted-content"}
+PUBLISHED_SOURCE_TYPES = {"journal", "book series", "ebook platform"}
+PUBLISHED_INDEXES = {"pubmed", "doaj"}  # not crossref: preprint servers mint Crossref DOIs too
+
+
+def is_grey_literature(work):
+    """True unless the work is a non-grey type AND appears in a journal/book
+    venue (in any of its locations, other than as a submitted manuscript) or
+    is indexed in PubMed/DOAJ. The index check matters: many published
+    articles' OpenAlex records only list PubMed/PMC repository copies, with
+    no journal location."""
+    if work.get("type") in GREY_WORK_TYPES:
+        return True
+    for loc in work.get("locations") or []:
+        if (loc.get("source") or {}).get("type") in PUBLISHED_SOURCE_TYPES and loc.get("version") != "submittedVersion":
+            return False
+    return not PUBLISHED_INDEXES.intersection(work.get("indexed_in") or [])
+
+
 def normalize_work(work):
     paper_id = work["id"].rsplit("/", 1)[-1]
     title = work.get("title") or work.get("display_name") or ""
@@ -144,6 +169,7 @@ def normalize_work(work):
     )
     concepts = sorted(work.get("concepts") or [], key=lambda c: -(c.get("score") or 0))[:3]
     fields_of_study = "; ".join(c["display_name"] for c in concepts)
+    source = (work.get("primary_location") or {}).get("source") or {}
 
     return {
         "PaperId": paper_id,
@@ -155,6 +181,10 @@ def normalize_work(work):
         "Lang": work.get("language") or "",
         "PubYear": work.get("publication_year"),
         "PubDate": work.get("publication_date") or "",
+        "WorkType": work.get("type") or "",
+        "SourceName": source.get("display_name") or "",
+        "SourceType": source.get("type") or "",
+        "GreyLiterature": is_grey_literature(work),
     }
 
 
@@ -269,8 +299,9 @@ def merge_papers(existing_df, new_rows):
       2. by normalized title + abstract -- OpenAlex sometimes indexes the
          same paper under more than one work id (a preprint and its
          published version, or a plain duplicate record), so identical
-         content slips past the PaperId pass. The copy with the longest
-         abstract is kept, ties broken by the earliest PubDate, on the
+         content slips past the PaperId pass. A published copy is kept
+         over a grey-literature one (e.g. a preprint); then the copy with
+         the longest abstract, ties broken by the earliest PubDate, on the
          assumption that's the most complete / canonical record.
 
     Rows with neither a title nor an abstract are dropped outright -- they
@@ -305,14 +336,16 @@ def merge_papers(existing_df, new_rows):
         norm_abstract = norm_abstract[has_content].reset_index(drop=True)
         content_key = content_key[has_content].reset_index(drop=True)
 
-        # Visit the richest copy (longest abstract, then earliest PubDate)
-        # first so duplicated(keep="first") drops the poorer copies.
+        # Visit the best copy (published, then longest abstract, then
+        # earliest PubDate) first so duplicated(keep="first") drops the rest.
+        grey = merged["GreyLiterature"] if "GreyLiterature" in merged.columns else pd.Series(False, index=merged.index)
         rank = pd.DataFrame({
+            "grey": grey.astype(str).str.lower().eq("true"),
             "abstract_len": norm_abstract.str.len(),
             "pubdate": pd.to_datetime(merged.get("PubDate"), errors="coerce"),
         })
         visit_order = rank.sort_values(
-            ["abstract_len", "pubdate"], ascending=[False, True]
+            ["grey", "abstract_len", "pubdate"], ascending=[True, False, True]
         ).index
         drop_idx = visit_order[content_key.loc[visit_order].duplicated(keep="first")]
         merged = merged.drop(index=drop_idx).reset_index(drop=True)
@@ -327,7 +360,196 @@ def merge_papers(existing_df, new_rows):
     return merged
 
 # ==========================================================================
-# 2. Topic model (full-corpus refit)
+# 2. Study type classification (LLM), cached per paper
+#
+# Each paper gets exactly one StudyType code (keys of STUDY_TYPES). A paper's
+# design doesn't change between runs, so labels are cached in
+# <data-dir>/study_types.csv keyed by a hash of its title and abstract (not
+# by PaperId: OpenAlex merges duplicate works under new ids every month):
+# after the first full pass only new or edited papers are sent to the LLM.
+# ==========================================================================
+
+LLM_MODEL = "Qwen/Qwen3-Next-80B-A3B-Instruct" #"meta-llama/Llama-3.3-70B-Instruct"
+LLM_SYSTEM_MSG = "You are a helpful expert assistant for working with topics from the scientific literature in the field of mental health."
+STUDY_TYPE_WORKERS = 16  # concurrent LLM requests
+
+
+def llm_client():
+    from openai import OpenAI
+    return OpenAI(api_key=OPENAI_API_KEY, base_url="https://api.deepinfra.com/v1/openai")
+
+
+def llm_complete(client, prompt, **kwargs):
+    completion = client.chat.completions.create(
+        model=LLM_MODEL,
+        messages=[{"role": "system", "content": LLM_SYSTEM_MSG}, {"role": "user", "content": prompt}],
+        **kwargs)
+    return completion.choices[0].message.content
+
+
+STUDY_TYPES = {
+    "interventional": "investigators assign an intervention or experimental manipulation to human participants: "
+                      "randomised, non-randomised, single-arm, crossover, pilot and feasibility trials, human "
+                      "laboratory experiments, and secondary or post hoc analyses of trial data",
+    "observational": "quantitative studies of human participants or records without an assigned intervention: "
+                     "cohort, cross-sectional, case-control, registry, survey and population studies; diagnostic "
+                     "accuracy and psychometric validation; genetic studies incl. Mendelian randomisation; "
+                     "neuroimaging comparisons of patients and controls; machine learning or AI models built on "
+                     "data from real people (health records, imaging, physiological signals, questionnaires, "
+                     "social media posts)",
+    "qualitative": "interviews, focus groups, thematic or other qualitative analysis of human participants",
+    "case_report": "a single patient or a small case series",
+    "animal": "experiments in live animals (rodents, zebrafish, primates, etc.)",
+    "in_vitro": "cell lines, primary cell cultures, organoids, tissue or molecular assays without live animals, "
+                "and computational work on molecular or cellular data (molecular docking, network pharmacology)",
+    "systematic_review": "systematic review, meta-analysis, umbrella review, or meta-regression",
+    "other_review": "narrative, scoping, or other non-systematic literature review",
+    "protocol": "protocol describing a planned or ongoing study, without results",
+    "other": "editorial, commentary, letter, news item, peer-review report, guideline, consensus statement, "
+             "theoretical or opinion paper, simulation using no empirical data, or anything that fits none of the above",
+}
+
+STUDY_TYPE_PROMPT = """Classify the study design of the paper below from its title and abstract.
+
+Labels:
+{labels}
+
+Rules:
+- Reviews and meta-analyses are systematic_review or other_review, whatever kinds of studies they include.
+- A protocol without results is protocol, whatever design it plans.
+- If the paper combines several designs, use the main one: animal over in_vitro; interventional over
+  observational or qualitative (e.g. a trial with an embedded qualitative component).
+- If the paper reports both human and animal or cell work, use the design of its main research question.
+- Editorials, commentaries, letters, news items, opinion pieces and peer-review reports are other, even when
+  they discuss a trial, review or other study.
+- Computational studies take the label of the data they analyse: machine learning, AI or simulation on data
+  from real people is observational; docking or network pharmacology on molecular data is in_vitro.
+
+Answer with exactly one label from the list and nothing else.
+
+Title: {title}
+Abstract: {abstract}
+Label:"""
+
+
+# Bump when STUDY_TYPES or STUDY_TYPE_PROMPT change in a way that should
+# relabel already-classified papers (the next run then reclassifies the whole corpus).
+STUDY_TYPE_PROMPT_VERSION = 2
+
+# OpenAlex work types that are never primary research or reviews: labelled
+# "other" directly, without an LLM call.
+NON_RESEARCH_WORK_TYPES = {"editorial", "letter", "peer-review", "paratext", "erratum", "retraction",
+                           "book-review", "reference-entry"}
+
+
+def parse_study_type(response):
+    """Map an LLM response onto a STUDY_TYPES key, or None if it names none
+    (or several)."""
+    text = re.sub(r"[\s-]+", "_", (response or "").strip().lower()).strip("_.`'\"*:")
+    if text in STUDY_TYPES:
+        return text
+    hits = [t for t in STUDY_TYPES if re.search(rf"(?<![a-z_]){t}(?![a-z_])", text)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _content_hash(papers_df):
+    import hashlib
+    text = (f"v{STUDY_TYPE_PROMPT_VERSION}\x1f" + papers_df["PaperTitle"].fillna("").astype(str)
+            + "\x1f" + papers_df["Abstract"].fillna("").astype(str))
+    return text.map(lambda t: hashlib.md5(t.encode()).hexdigest()[:16])
+
+
+def classify_study_types(papers_df, cache_path, workers=STUDY_TYPE_WORKERS, flush_every=500):
+    """Return papers_df with a StudyType column. Papers whose OpenAlex
+    WorkType is non-research (NON_RESEARCH_WORK_TYPES) are labelled "other"
+    directly. Other papers not in the cache (or whose title/abstract, or
+    STUDY_TYPE_PROMPT_VERSION, changed) are sent to the LLM, `workers` at a
+    time; results are appended to the cache as they arrive, so an
+    interrupted run loses at most `flush_every` labels. A response naming
+    no label is recorded as "other" (and counted); a paper whose request
+    keeps failing is left blank and retried on the next run."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    papers_df = papers_df.drop(columns=["StudyType"], errors="ignore")
+    hashes = _content_hash(papers_df)
+    cache = (pd.read_csv(cache_path, dtype=str) if os.path.exists(cache_path)
+             else pd.DataFrame(columns=["PaperId", "ContentHash", "StudyType"]))
+    cached = set(cache["ContentHash"])
+    non_research = (papers_df["WorkType"].isin(NON_RESEARCH_WORK_TYPES) if "WorkType" in papers_df.columns
+                    else pd.Series(False, index=papers_df.index)).to_numpy()
+    todo = [i for i, h in enumerate(hashes) if h not in cached and not non_research[i]]
+    print(f"  {int(non_research.sum())} non-research paper(s) by OpenAlex work type; "
+          f"{len(papers_df) - len(todo) - int(non_research.sum())} already classified; {len(todo)} to classify")
+
+    if todo:
+        labels = "\n".join(f"- {code}: {desc}" for code, desc in STUDY_TYPES.items())
+        client = llm_client()
+        n_unparsed, n_failed, pending = 0, 0, []
+
+        def classify(i):
+            row = papers_df.iloc[i]
+            prompt = STUDY_TYPE_PROMPT.format(labels=labels, title=row["PaperTitle"],
+                                              abstract=row["Abstract"] if isinstance(row["Abstract"], str) else "")
+            for attempt in range(3):
+                try:
+                    return i, llm_complete(client, prompt, temperature=0, max_tokens=10)
+                except Exception as e:
+                    last_error = e
+                    time.sleep(5 * (attempt + 1))
+            raise last_error
+
+        def flush():
+            if pending:
+                pd.DataFrame(pending, columns=["PaperId", "ContentHash", "StudyType"]).to_csv(
+                    cache_path, mode="a", header=not os.path.exists(cache_path), index=False)
+                pending.clear()
+
+        started = time.time()
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(classify, i) for i in todo]
+            for done, future in enumerate(as_completed(futures), start=1):
+                try:
+                    i, response = future.result()
+                except Exception as e:
+                    n_failed += 1
+                    if n_failed <= 5:
+                        print(f"  classification request failed ({e})")
+                    continue
+                study_type = parse_study_type(response)
+                if study_type is None:
+                    n_unparsed += 1
+                    if n_unparsed <= 5:
+                        print(f"  unrecognised label {response!r} for {papers_df.iloc[i]['PaperId']}; recording 'other'")
+                    study_type = "other"
+                pending.append((papers_df.iloc[i]["PaperId"], hashes.iloc[i], study_type))
+                if len(pending) >= flush_every:
+                    flush()
+                if done % 5000 == 0:
+                    rate = done / (time.time() - started)
+                    print(f"  ...{done}/{len(todo)} classified ({rate:.1f}/s, ~{(len(todo) - done) / rate / 60:.0f} min left)")
+        flush()
+        print(f"  classified {len(todo) - n_failed} paper(s); {n_unparsed} unrecognised response(s) recorded as "
+              f"'other'; {n_failed} failed request(s) left for the next run")
+
+    # Keep only the current corpus's entries (latest label per paper) so the cache doesn't grow unboundedly.
+    cache = (pd.read_csv(cache_path, dtype=str) if os.path.exists(cache_path)
+             else pd.DataFrame(columns=["PaperId", "ContentHash", "StudyType"]))
+    cache = cache.drop_duplicates("ContentHash", keep="last")
+    current = pd.DataFrame({"PaperId": papers_df["PaperId"].astype(str), "ContentHash": hashes})
+    cache = current.merge(cache[["ContentHash", "StudyType"]], on="ContentHash", how="inner")
+    cache.to_csv(cache_path, index=False)
+
+    papers_df = papers_df.assign(ContentHash=hashes.to_numpy()).merge(
+        cache[["ContentHash", "StudyType"]].drop_duplicates("ContentHash"), on="ContentHash", how="left"
+    ).drop(columns="ContentHash")
+    papers_df.loc[non_research, "StudyType"] = "other"
+    counts = papers_df["StudyType"].fillna("(unclassified)").value_counts()
+    print("  study types: " + ", ".join(f"{k} {v / len(papers_df):.1%}" for k, v in counts.items()))
+    return papers_df
+
+
+# ==========================================================================
+# 3. Topic model (full-corpus refit)
 # ==========================================================================
 
 def build_documents(papers_df):
@@ -408,7 +630,7 @@ def summarize_topic_model(topic_model):
 
 
 # ==========================================================================
-# 3. Binary paper-topic assignment matrix
+# 4. Binary paper-topic assignment matrix
 # ==========================================================================
 
 def build_paper_topic_matrix(papers_df, topic_distr, threshold=ASSIGNMENT_THRESHOLD):
@@ -423,7 +645,7 @@ def build_paper_topic_matrix(papers_df, topic_distr, threshold=ASSIGNMENT_THRESH
 
 
 # ==========================================================================
-# 4. Topic history: map this run's topics onto the previous run's
+# 5. Topic history: map this run's topics onto the previous run's
 #
 # Topic ids aren't stable across full-corpus refits, so continuity is
 # tracked separately: every topic carries a LineageId, inherited from the
@@ -576,7 +798,7 @@ def archive_run(history_dir, label, topics_df, paper_topic_matrix, predictions_d
 
 
 # ==========================================================================
-# 5. Topic naming
+# 6. Topic naming
 # ==========================================================================
 
 def name_topics(keywords, inherited_names):
@@ -590,28 +812,11 @@ def name_topics(keywords, inherited_names):
     if not to_name:
         return results
 
-    from openai import OpenAI
-
-    SYSTEM_MSG = "You are a helpful expert assistant for working with topics from the scientific literature in the field of mental health."
-    modelname = "Qwen/Qwen3-Next-80B-A3B-Instruct" #"meta-llama/Llama-3.3-70B-Instruct"
-    client = OpenAI(
-            api_key = OPENAI_API_KEY,
-            base_url="https://api.deepinfra.com/v1/openai",
-    )
-    def generateFromPrompt(promptStr,maxTokens=100):
-        messages=[
-            {"role": "system", "content": SYSTEM_MSG},
-            {"role": "user", "content": promptStr}
-        ]
-        completion = client.chat.completions.create(
-        model=modelname,
-        messages=messages)
-        response=completion.choices[0].message.content
-        return(response)
+    client = llm_client()
 
     for topic_id in to_name:
         try:
-            name = generateFromPrompt(f"Please give a concise phrase to describe the main research topic within the field of mental health that unifies the following words and indicates the mental health relevance: {keywords[topic_id]}. Please return only the word or phrase with no explanation. Topic: ").strip()
+            name = llm_complete(client, f"Please give a concise phrase to describe the main research topic within the field of mental health that unifies the following words and indicates the mental health relevance: {keywords[topic_id]}. Please return only the word or phrase with no explanation. Topic: ").strip()
         except Exception as e:
             print(f"  LLM naming failed for topic {topic_id} ({e}); using its top keywords instead")
             name = ", ".join(keywords[topic_id][:3])
@@ -620,7 +825,7 @@ def name_topics(keywords, inherited_names):
 
 
 # ==========================================================================
-# 6. Monthly mention counts (wide format)
+# 7. Monthly mention counts (wide format)
 # ==========================================================================
 
 def build_monthly_mentions(paper_topic_matrix):
@@ -652,7 +857,7 @@ def build_monthly_mentions(paper_topic_matrix):
 
 
 # ==========================================================================
-# 7. Trend prediction model
+# 8. Trend prediction model
 #
 # This is a PyTorch port of a TensorFlow/Keras notebook, kept deliberately
 # close to the original's specific (and slightly unusual) design rather
@@ -959,13 +1164,14 @@ def run_pipeline(data_dir, since=None, skip_fetch=False, skip_topic_model=False,
     predictions_path = os.path.join(data_dir, "trendy_predictions.csv")
     paper_topics_path = os.path.join(data_dir, "paper_topic_assignments.csv")
     staging_path = os.path.join(data_dir, "papers_fetching.csv")
+    study_types_path = os.path.join(data_dir, "study_types.csv")
     history_dir = os.path.join(data_dir, "history")
     run_label = history_label()
 
     existing_papers = pd.read_csv(papers_path) if os.path.exists(papers_path) else pd.DataFrame()
 
     window = corpus_window()
-    print(f"[1/8] Fetching papers published {window[0]} .. {window[1]} from OpenAlex...")
+    print(f"[1/9] Fetching papers published {window[0]} .. {window[1]} from OpenAlex...")
     if skip_fetch:
         print("  --skip-fetch set; using existing papers only")
         papers_df = existing_papers
@@ -1031,11 +1237,14 @@ def run_pipeline(data_dir, since=None, skip_fetch=False, skip_topic_model=False,
     if skip_fetch:
         papers_df = restrict_to_window(papers_df, window)
         print(f"  corpus now has {len(papers_df)} papers total")
-        if not topic_model_only:  # --topic-model-only doesn't touch the corpus file
-            papers_df.to_csv(papers_path, index=False)
+
+    print("[2/9] Classifying study types...")
+    papers_df = classify_study_types(papers_df, study_types_path)
+    if not topic_model_only:  # --topic-model-only doesn't touch the corpus file
+        papers_df.to_csv(papers_path, index=False)
 
     if skip_topic_model:
-        print("[2-5/8] --skip-topic-model set; reloading topics and paper-topic matrix from --data-dir...")
+        print("[3-6/9] --skip-topic-model set; reloading topics and paper-topic matrix from --data-dir...")
         if not (os.path.exists(topics_path) and os.path.exists(paper_topics_path)):
             raise SystemExit(
                 f"--skip-topic-model requires an existing {topics_path} and {paper_topics_path} "
@@ -1047,23 +1256,23 @@ def run_pipeline(data_dir, since=None, skip_fetch=False, skip_topic_model=False,
         print(f"  loaded {len(topics_df)} topics, {len(paper_topic_matrix)} paper-topic rows "
               f"({n_topic_cols} topic columns)")
     else:
-        print("[2/8] Refitting the topic model on the full corpus...")
+        print("[3/9] Refitting the topic model on the full corpus...")
         topic_model, docs, topic_distr = fit_topic_model(papers_df)
         n_topics = topic_distr.shape[1]
         print(f"  found {n_topics} topics across {len(docs)} documents")
         summarize_topic_model(topic_model)
 
-        print("[3/8] Building the binary paper-topic assignment matrix...")
+        print("[4/9] Building the binary paper-topic assignment matrix...")
         paper_topic_matrix = build_paper_topic_matrix(papers_df, topic_distr)
         paper_topic_matrix.to_csv(paper_topics_path, index=False)
 
-        print(f"[4/8] Mapping topics onto the previous run's ({history_dir})...")
+        print(f"[5/9] Mapping topics onto the previous run's ({history_dir})...")
         keywords = topic_keywords(topic_model, n_topics)
         mapping = map_to_previous_run(keywords, paper_topic_matrix,
                                       load_previous_run(history_dir, run_label),
                                       next_lineage_id(history_dir, run_label))
 
-        print("[5/8] Naming topics...")
+        print("[6/9] Naming topics...")
         inherited = {int(r.Topic): r.InheritedName for r in mapping.itertuples() if r.Matched}
         names = name_topics(keywords, inherited)
         topics_df = pd.DataFrame({"Topic": range(n_topics),
@@ -1086,18 +1295,18 @@ def run_pipeline(data_dir, since=None, skip_fetch=False, skip_topic_model=False,
                 "topic_model_only": True,
             }
 
-    print("[6/8] Building monthly mention counts...")
+    print("[7/9] Building monthly mention counts...")
     monthly_df = build_monthly_mentions(paper_topic_matrix)
     monthly_df.to_csv(monthly_path, index=False)
 
-    print("[7/8] Fitting the trend model and computing trendiness...")
+    print("[8/9] Fitting the trend model and computing trendiness...")
     predictions_df = fit_trend_model(monthly_df, checkpoint_path=predictions_path)
     predictions_df.to_csv(predictions_path, index=False)
 
     n_trendy = int(predictions_df["Trendy"].sum()) if not predictions_df.empty else 0
     print(f"  {n_trendy} of {len(predictions_df)} topics flagged trendy")
 
-    print(f"[8/8] Archiving this run as {run_label}...")
+    print(f"[9/9] Archiving this run as {run_label}...")
     if "LineageId" in topics_df.columns:
         archive_run(history_dir, run_label, topics_df, paper_topic_matrix, predictions_df)
     else:

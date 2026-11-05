@@ -130,6 +130,31 @@ refits everything, and does a full `init_db.py --reset` + reimport +
 `compute_embeddings.py` (topic ids aren't stable across a full-corpus
 refit, so this is a full rebuild each run, not an incremental patch).
 
+### Study type and grey literature
+
+Every paper gets two further labels, stored in `papers.csv` (and the
+database's `papers` table):
+
+- **`StudyType`** — one study design per paper, assigned by the LLM from the
+  title and abstract (`classify_study_types`): `interventional`,
+  `observational`, `qualitative`, `case_report`, `animal`, `in_vitro`,
+  `systematic_review`, `other_review`, `protocol`, `other`. Computational
+  studies take the label of the data they analyse (e.g. machine learning on
+  patient records is `observational`, molecular docking is `in_vitro`). The
+  definitions and tie-break rules are in `STUDY_TYPES` /
+  `STUDY_TYPE_PROMPT`. Papers OpenAlex types as editorials, letters, peer
+  reviews etc. are labelled `other` without an LLM call. Labels are cached
+  in `pipeline_data/study_types.csv` by a hash of title + abstract, so only
+  new or edited papers are classified each month (the first full pass is
+  ~250k LLM calls; it is resumable). Bump `STUDY_TYPE_PROMPT_VERSION` after
+  changing the categories or prompt to relabel everything.
+- **`GreyLiterature`** — from OpenAlex metadata at fetch time
+  (`is_grey_literature`): preprints, dissertations, conference abstracts and
+  papers, reports and datasets are grey; anything else is published if it
+  has a journal/book location or is indexed in PubMed or DOAJ. When the same
+  paper appears both as a preprint and as a published article, the published
+  copy is kept.
+
 ### Topic history
 
 Topic ids are re-derived on every refit, so continuity between monthly
