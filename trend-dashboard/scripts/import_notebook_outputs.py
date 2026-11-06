@@ -383,6 +383,56 @@ def build_topic_study_types(conn):
     print(f"  topic study-type counts rebuilt ({n} topics)")
 
 
+# Related topics (topic_relations): >= 8 of 15 shared keywords, or more than
+# half of the smaller topic's papers shared.
+RELATED_MIN_KEYWORDS = 8
+RELATED_MIN_PAPER_SHARE = 0.5
+
+
+def build_topic_relations(conn):
+    """Rebuild the derived topic_relations table from topics.keywords and
+    paper_topics (see schema.sql)."""
+    conn.execute("DELETE FROM topic_relations")
+    n_papers = dict(conn.execute("SELECT topic_id, COUNT(*) FROM paper_topics GROUP BY topic_id").fetchall())
+    shared = {
+        (a, b): n
+        for a, b, n in conn.execute(
+            """
+            SELECT a.topic_id, b.topic_id, COUNT(*)
+            FROM paper_topics a JOIN paper_topics b
+              ON a.paper_id = b.paper_id AND a.topic_id < b.topic_id
+            GROUP BY a.topic_id, b.topic_id
+            """
+        )
+    }
+    keywords = {}
+    for topic_id, raw in conn.execute("SELECT topic_id, keywords FROM topics"):
+        try:
+            keywords[topic_id] = {k.lower() for k in json.loads(raw or "[]")}
+        except (TypeError, ValueError):
+            keywords[topic_id] = set()
+    ids = sorted(keywords)
+    rows = []
+    for i, a in enumerate(ids):
+        for b in ids[i + 1:]:
+            kw = len(keywords[a] & keywords[b])
+            n_shared = shared.get((a, b), 0)
+            na, nb = n_papers.get(a, 0), n_papers.get(b, 0)
+            smaller = min(na, nb)
+            if kw >= RELATED_MIN_KEYWORDS or (smaller and n_shared / smaller > RELATED_MIN_PAPER_SHARE):
+                share_a = n_shared / na if na else 0.0
+                share_b = n_shared / nb if nb else 0.0
+                rows.append((a, b, kw, n_shared, share_a, share_b))
+                rows.append((b, a, kw, n_shared, share_b, share_a))
+    conn.executemany(
+        "INSERT INTO topic_relations (topic_id, related_topic_id, keyword_overlap, shared_papers, "
+        "paper_share, related_paper_share) VALUES (?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    n_topics = len({r[0] for r in rows})
+    print(f"  related topics rebuilt ({len(rows) // 2} pairs, {n_topics} topics with at least one)")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--papers", help="search-results CSV: PaperId,PaperTitle,Citations,coFoS,Authors,Abstract,Lang,PubYear,PubDate")
@@ -424,6 +474,7 @@ def main():
 
     # Always rebuilt, so running this script with no arguments refreshes it.
     build_topic_study_types(conn)
+    build_topic_relations(conn)
 
     conn.commit()
     conn.close()

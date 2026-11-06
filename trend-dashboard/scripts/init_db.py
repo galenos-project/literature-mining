@@ -17,7 +17,7 @@ SCHEMA_PATH = os.path.join(BASE_DIR, "schema.sql")
 # topic_paper_samples is no longer created (the old paper-landscape scatter);
 # it stays here so --reset drops it from databases built before.
 TABLES = ["paper_topics", "papers", "monthly_counts", "topics", "topic_history",
-          "topic_study_types", "topic_paper_samples"]
+          "topic_study_types", "topic_relations", "topic_paper_samples"]
 
 
 def main():

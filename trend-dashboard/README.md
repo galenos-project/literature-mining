@@ -17,9 +17,12 @@ GRU time-series model &rarr; trendiness ranking.
 - **Topic explorer** — pick any topic from a dropdown to see its full
   monthly timeline (actual mentions vs the model's predicted mentions,
   matching the blue/orange convention in the paper's figures).
+- **Topic page** — the topic's timeline, its papers by study type, its
+  history across monthly updates, and related topics (sharing at least 8
+  of 15 keywords, or more than half of the smaller topic's papers).
 - **Drill-down** — click any month on a timeline to see the titles,
-  abstracts, authors and links of the papers that mentioned that topic that
-  month.
+  abstracts, authors, venue, published/grey-literature status, study type
+  and links of the papers that mentioned that topic that month.
 
 ## Quickstart (with synthetic sample data)
 
@@ -81,8 +84,10 @@ that are trials or systematic reviews (x) and pre-clinical studies (y),
 sized by papers; its table view lists every trending topic's full
 study-type profile. It reads `topic_study_types`, a small derived table of
 papers per study type per topic that `import_notebook_outputs.py` rebuilds
-at the end of every import (running it with no arguments just rebuilds
-that table).
+at the end of every import, together with `topic_relations` (the topic
+page's related topics; thresholds `RELATED_MIN_KEYWORDS` and
+`RELATED_MIN_PAPER_SHARE` in the importer). Running the importer with no
+arguments just rebuilds these two tables.
 
 ## Monthly batch updates
 
@@ -111,7 +116,10 @@ adding papers to past months and updating existing records; papers that
 have rolled out of the window are dropped. The refetch goes to
 `pipeline_data/papers_fetching.csv` and only replaces `papers.csv` once
 complete (an interrupted run resumes from it automatically), and it's
-refused if the corpus would shrink by more than 5%. The run then
+refused if the corpus would shrink by more than 5%. Duplicate records are
+merged (same PaperId; same title and abstract; or same abstract, authors
+and date with one title contained in the other -- see `merge_papers`),
+keeping a published copy over a grey-literature one. The run then
 refits everything, and does a full `init_db.py --reset` + reimport
 (topic ids aren't stable across a full-corpus
 refit, so this is a full rebuild each run, not an incremental patch).

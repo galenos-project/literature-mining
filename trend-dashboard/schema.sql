@@ -103,3 +103,21 @@ CREATE TABLE IF NOT EXISTS topic_study_types (
     n_papers    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_topic_study_types_topic ON topic_study_types(topic_id);
+
+-- Derived data: pairs of related topics, for the topic page's "Related
+-- topics" panel, rebuilt by scripts/import_notebook_outputs.py after every
+-- import. Two topics are related if they share at least
+-- RELATED_MIN_KEYWORDS of their 15 keywords, or if at least
+-- RELATED_MIN_PAPER_SHARE of the smaller topic's papers are also assigned
+-- to the other (thresholds in the importer). Stored in both directions;
+-- paper_share = shared papers / this topic's papers, related_paper_share =
+-- shared papers / the related topic's papers.
+CREATE TABLE IF NOT EXISTS topic_relations (
+    topic_id             INTEGER NOT NULL REFERENCES topics(topic_id),
+    related_topic_id     INTEGER NOT NULL REFERENCES topics(topic_id),
+    keyword_overlap      INTEGER NOT NULL,
+    shared_papers        INTEGER NOT NULL,
+    paper_share          REAL NOT NULL,
+    related_paper_share  REAL NOT NULL,
+    PRIMARY KEY (topic_id, related_topic_id)
+);

@@ -39,8 +39,9 @@ def create_app():
         timeline = db.get_topic_timeline(conn, topic_id)
         history = db.get_topic_history(conn, topic["lineage_id"])
         study_types = db.get_study_type_counts(conn, topic_id)
+        related = db.get_related_topics(conn, topic_id)
         return render_template("topic.html", topic=topic, timeline=timeline, history=history,
-                               study_types=study_types)
+                               study_types=study_types, related=related)
 
     @app.route("/topic/<int:topic_id>/month/<int:year>/<int:month>")
     def topic_month(topic_id, year, month):

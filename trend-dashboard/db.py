@@ -56,6 +56,30 @@ def get_topic(db, topic_id):
     return _topic_row_to_dict(row) if row else None
 
 
+def get_related_topics(db, topic_id):
+    """Topics related to this one (precomputed topic_relations), most
+    overlapping first, each with its shared keywords."""
+    this = db.execute("SELECT keywords FROM topics WHERE topic_id = ?", (topic_id,)).fetchone()
+    this_kw = {k.lower() for k in json.loads(this["keywords"] or "[]")} if this else set()
+    rows = db.execute(
+        """
+        SELECT t.topic_id, t.name, t.n_papers, t.is_trendy, t.keywords,
+               r.keyword_overlap, r.shared_papers, r.paper_share, r.related_paper_share
+        FROM topic_relations r JOIN topics t ON t.topic_id = r.related_topic_id
+        WHERE r.topic_id = ?
+        """,
+        (topic_id,),
+    ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["is_trendy"] = bool(d["is_trendy"])
+        d["shared_keywords"] = [k for k in json.loads(d.pop("keywords") or "[]") if k.lower() in this_kw]
+        out.append(d)
+    out.sort(key=lambda d: (-max(d["paper_share"], d["related_paper_share"]), -d["keyword_overlap"]))
+    return out
+
+
 def get_topic_history(db, lineage_id):
     """One row per monthly run this topic's lineage appears in, newest first,
     with the number of trendy topics in that run for context."""
@@ -90,7 +114,8 @@ def get_papers_for_topic_month(db, topic_id, year, month):
     rows = db.execute(
         """
         SELECT p.paper_id, p.title, p.abstract, p.authors, p.publication_date,
-               p.citations, p.fields_of_study, p.language, p.openalex_url, pt.probability
+               p.citations, p.fields_of_study, p.language, p.openalex_url, pt.probability,
+               p.study_type, p.grey_literature, p.work_type, p.source_name
         FROM papers p
         JOIN paper_topics pt ON pt.paper_id = p.paper_id
         WHERE pt.topic_id = ?
@@ -99,7 +124,13 @@ def get_papers_for_topic_month(db, topic_id, year, month):
         """,
         (topic_id, month_str),
     ).fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["study_type_label"] = study_type_label(d["study_type"])
+        d["work_type_label"] = (d["work_type"] or "").replace("-", " ")
+        out.append(d)
+    return out
 
 
 # Study types assigned by the pipeline (StudyType codes), in display order,
@@ -117,6 +148,15 @@ STUDY_TYPES = [
     ("protocol", "Study protocol", "Other"),
     ("other", "Other / non-research", "Other"),
 ]
+
+
+def study_type_label(code):
+    """Display label for a study-type code (None if unclassified); codes no
+    longer in STUDY_TYPES display as "other", as in the counts."""
+    if code is None:
+        return None
+    labels = {c: label for c, label, _ in STUDY_TYPES}
+    return labels.get(code, labels["other"])
 
 
 def get_study_type_counts(db, topic_id=None):

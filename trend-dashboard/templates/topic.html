@@ -72,6 +72,44 @@
   <p class="empty-state">New this month: no topic in an earlier update matched this one.</p>
   {% endif %}
 </section>
+
+<section class="panel panel--spaced">
+  <div class="panel__head">
+    <h2>Related topics</h2>
+    <p class="panel__hint">Other topics sharing at least 8 of their 15 keywords with this one, or more than half
+      of the smaller topic's papers. A paper can be assigned to several topics.</p>
+  </div>
+  {% if related %}
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr><th>Topic</th><th class="num">Papers</th><th>Shared keywords</th><th>Shared papers</th></tr>
+      </thead>
+      <tbody>
+        {% for r in related %}
+        <tr>
+          <td><a href="{{ url_for('topic_detail', topic_id=r.topic_id) }}">{{ r.name }}</a>
+            {% if r.is_trendy %}<span class="badge badge--trendy">trending</span>{% endif %}</td>
+          <td class="num">{{ "{:,}".format(r.n_papers) }}</td>
+          <td>
+            <span class="nowrap">{{ r.keyword_overlap }}/15</span>
+            {% if r.shared_keywords %}<div class="keyword-chips keyword-chips--small">
+              {% for kw in r.shared_keywords %}<span class="chip">{{ kw }}</span>{% endfor %}</div>{% endif %}
+          </td>
+          <td>
+            {{ "{:,}".format(r.shared_papers) }}
+            <span class="muted">&middot; {{ "%.0f"|format(r.paper_share * 100) }}% of this topic&rsquo;s,
+              {{ "%.0f"|format(r.related_paper_share * 100) }}% of that topic&rsquo;s</span>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty-state">No other topic overlaps this one by more than half of its keywords or papers.</p>
+  {% endif %}
+</section>
 {% endblock %}
 
 {% block head %}

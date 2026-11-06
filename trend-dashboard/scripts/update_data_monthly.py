@@ -302,8 +302,16 @@ def merge_papers(existing_df, new_rows):
          published version, or a plain duplicate record), so identical
          content slips past the PaperId pass. A published copy is kept
          over a grey-literature one (e.g. a preprint); then the copy with
-         the longest abstract, ties broken by the earliest PubDate, on the
-         assumption that's the most complete / canonical record.
+         the longest abstract, then the longest title, ties broken by the
+         earliest PubDate, on the assumption that's the most complete /
+         canonical record.
+      3. by abstract + authors + PubDate where one title contains the
+         other -- the same paper with a truncated or prefixed title, e.g.
+         "Supplementary Material for: <title>", a dissertation and the
+         article from it, or a title cut off part-way. The title check
+         matters: whole conference proceedings often give every abstract
+         in them the same (combined) abstract, authors and date. Same
+         preference order as pass 2.
 
     Rows with neither a title nor an abstract are dropped outright -- they
     carry nothing for the topic model. Both cleanups run over the whole
@@ -337,27 +345,57 @@ def merge_papers(existing_df, new_rows):
         norm_abstract = norm_abstract[has_content].reset_index(drop=True)
         content_key = content_key[has_content].reset_index(drop=True)
 
-        # Visit the best copy (published, then longest abstract, then
-        # earliest PubDate) first so duplicated(keep="first") drops the rest.
+        # Visit the best copy (published, then longest abstract, then longest
+        # title, then earliest PubDate) first so duplicated(keep="first")
+        # drops the rest.
         grey = merged["GreyLiterature"] if "GreyLiterature" in merged.columns else pd.Series(False, index=merged.index)
+        norm_title = _normalize_text(merged["PaperTitle"])
         rank = pd.DataFrame({
             "grey": grey.astype(str).str.lower().eq("true"),
             "abstract_len": norm_abstract.str.len(),
+            "title_len": norm_title.str.len(),
             "pubdate": pd.to_datetime(merged.get("PubDate"), errors="coerce"),
         })
         visit_order = rank.sort_values(
-            ["grey", "abstract_len", "pubdate"], ascending=[True, False, True]
+            ["grey", "abstract_len", "title_len", "pubdate"], ascending=[True, False, False, True]
         ).index
         drop_idx = visit_order[content_key.loc[visit_order].duplicated(keep="first")]
         merged = merged.drop(index=drop_idx).reset_index(drop=True)
+        n_after_content = len(merged)
 
-    n_after_content = len(merged)
+        # Pass 3: same abstract, authors and date, one title inside the other.
+        norm_abstract = norm_abstract.drop(index=drop_idx).reset_index(drop=True)
+        norm_title = norm_title.drop(index=drop_idx).reset_index(drop=True)
+        rank = rank.drop(index=drop_idx).reset_index(drop=True)
+        authors = _normalize_text(merged["Authors"]) if "Authors" in merged.columns else pd.Series("", index=merged.index)
+        group_key = norm_abstract + "\x1f" + authors + "\x1f" + merged.get("PubDate", pd.Series("", index=merged.index)).fillna("").astype(str)
+        candidates = group_key[(norm_abstract != "") & group_key.duplicated(keep=False)]
+        drop_title = []
+        if not candidates.empty:
+            order = rank.loc[candidates.index].sort_values(
+                ["grey", "abstract_len", "title_len", "pubdate"], ascending=[True, False, False, True]
+            ).index
+            kept_titles = {}
+            for i in order:
+                title = norm_title[i]
+                kept = kept_titles.setdefault(candidates[i], [])
+                if title and any(t and (title in t or t in title) for t in kept):
+                    drop_title.append(i)
+                else:
+                    kept.append(title)
+        merged = merged.drop(index=drop_title).reset_index(drop=True)
+    else:
+        n_after_content = len(merged)
+        drop_title = []
+
     if n_before != n_after_id:
         print(f"  deduped {n_before - n_after_id} paper(s) sharing a PaperId")
     if n_empty:
         print(f"  dropped {n_empty} paper(s) with no title or abstract")
     if n_after_id - n_empty != n_after_content:
         print(f"  deduped {n_after_id - n_empty - n_after_content} paper(s) with a duplicate title + abstract")
+    if drop_title:
+        print(f"  deduped {len(drop_title)} paper(s) with the same abstract, authors and date and a contained title")
     return merged
 
 # ==========================================================================

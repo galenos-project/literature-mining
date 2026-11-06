@@ -619,6 +619,28 @@ a:focus-visible, select:focus-visible, button:focus-visible {
   margin: 0 0 0.6rem;
 }
 
+.paper-card__venue { font-style: italic; color: var(--ink-soft); }
+
+.paper-card__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0 0 0.7rem;
+}
+
+/* Small labels on paper cards: neutral by default; published / grey
+   literature tinted to match the study-type chart (teal / violet). */
+.tag {
+  font-size: 0.74rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  color: var(--ink-soft);
+  background: var(--paper);
+}
+.tag--published { color: #00695F; background: #E3F2F0; border-color: #A9D6D0; }
+.tag--grey { color: #5B3FA6; background: #EFEAF9; border-color: #CFC2EE; }
+
 .paper-card__abstract {
   font-size: 0.92rem;
   color: var(--ink-soft);
@@ -626,6 +648,10 @@ a:focus-visible, select:focus-visible, button:focus-visible {
 }
 
 .panel--spaced { margin: 1.5rem 0; }
+
+.nowrap { white-space: nowrap; }
+.keyword-chips--small { margin-top: 0.35rem; gap: 0.3rem; }
+.keyword-chips--small .chip { font-size: 0.7rem; padding: 0.1rem 0.4rem; }
 
 .table-scroll { overflow-x: auto; }
 
