@@ -67,6 +67,16 @@
 
   const PLOTLY_CONFIG = { displayModeBar: false, responsive: true };
 
+  // Topic comparison chart. Lines can cross anywhere, so every pair of
+  // colours must stay distinguishable (dataviz validate_palette.js --pairs
+  // all, light, on #FFFFFF): blue, red, aqua, yellow, purple passes the
+  // normal-vision floor; CVD worst pair is 6.8, so each colour is also
+  // carried by the topic's chip, the legend and the hover label. That caps
+  // the comparison at five topics. Colours follow the topic (slot assigned
+  // when it's added), never its position in the list.
+  const COMPARE_PALETTE = ["#2a78d6", "#e34948", "#1baf7a", "#eda100", "#8e44ad"];
+  const MAX_COMPARE = COMPARE_PALETTE.length;
+
   // ---- Study-type breakdown (index + topic pages) -------------------------
 
   // Validated pair (dataviz validate_palette.js, light, on #FFFFFF): published
@@ -290,7 +300,9 @@
     const urls = window.GALENOS.urls;
     let allTopics = [];
     let topicsById = new Map();
-    let selectedTopicIds = []; // ordered, de-duplicated topic ids currently shown below
+    let selectedTopicIds = []; // ordered, de-duplicated topic ids currently compared below
+    const colorSlot = new Map(); // topic_id -> index into COMPARE_PALETTE
+    const timelineCache = new Map(); // topic_id -> Promise of /api/topics/<id>/timeline
     let trendChartTopicIds = []; // curveNumber -> topic_id, for click-through
     let trendSortMode = "rank";
     let trendTopicCount = 10;
@@ -309,7 +321,7 @@
         const topTrending = (window.GALENOS.defaultTopicIds || [])[0];
         const fallback = topics[0] && topics[0].topic_id;
         const initialId = topTrending != null ? Number(topTrending) : fallback != null ? Number(fallback) : null;
-        selectedTopicIds = initialId != null && topicsById.has(initialId) ? [initialId] : [];
+        if (initialId != null) addToSelection(initialId);
         renderSelectedTopics();
       });
 
@@ -319,15 +331,23 @@
       renderSelectedTopics();
     });
 
+    // Fills the free slots with the top trending topics not yet shown
+    // (allTopics is ordered by trend_rank, highest first).
     document.getElementById("add-trendy-btn").addEventListener("click", () => {
-      allTopics.filter((t) => t.is_trendy).forEach((t) => addToSelection(t.topic_id));
+      allTopics
+        .filter((t) => t.is_trendy && !isSelected(t.topic_id))
+        .slice(0, MAX_COMPARE - selectedTopicIds.length)
+        .forEach((t) => addToSelection(t.topic_id));
       renderSelectedTopics();
     });
 
     document.getElementById("clear-selected-btn").addEventListener("click", () => {
       selectedTopicIds = [];
+      colorSlot.clear();
       renderSelectedTopics();
     });
+
+    document.getElementById("compare-show-predicted").addEventListener("change", renderCompareChart);
 
     document.querySelectorAll(".sort-toggle__btn").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -348,18 +368,37 @@
       return selectedTopicIds.includes(Number(id));
     }
 
+    // Returns false (and flags the limit note) if the comparison is full.
     function addToSelection(id) {
       id = Number(id);
-      if (topicsById.has(id) && !selectedTopicIds.includes(id)) selectedTopicIds.push(id);
+      if (!topicsById.has(id) || selectedTopicIds.includes(id)) return true;
+      if (selectedTopicIds.length >= MAX_COMPARE) {
+        limitHit = true;
+        return false;
+      }
+      const used = new Set(colorSlot.values());
+      colorSlot.set(id, COMPARE_PALETTE.findIndex((_, i) => !used.has(i)));
+      selectedTopicIds.push(id);
+      return true;
+    }
+
+    function removeFromSelection(id) {
+      id = Number(id);
+      selectedTopicIds = selectedTopicIds.filter((x) => x !== id);
+      colorSlot.delete(id);
     }
 
     function toggleSelection(id) {
-      id = Number(id);
-      const idx = selectedTopicIds.indexOf(id);
-      if (idx >= 0) selectedTopicIds.splice(idx, 1);
-      else if (topicsById.has(id)) selectedTopicIds.push(id);
+      if (isSelected(id)) removeFromSelection(id);
+      else addToSelection(id);
       renderSelectedTopics();
     }
+
+    function topicColor(id) {
+      return COMPARE_PALETTE[colorSlot.get(Number(id))];
+    }
+
+    let limitHit = false;
 
     function populateTopicSelect(topics) {
       const select = document.getElementById("topic-select");
@@ -416,14 +455,25 @@
           li.textContent = "No topics match \u201C" + q + "\u201D";
           results.appendChild(li);
         } else {
+          const free = MAX_COMPARE - selectedTopicIds.length;
+          const addable = matches.filter((t) => !isSelected(t.topic_id)).slice(0, free);
           const addAllLi = document.createElement("li");
           const addAllBtn = document.createElement("button");
           addAllBtn.type = "button";
           addAllBtn.className = "topic-search__addall";
-          addAllBtn.textContent =
-            "+ Add all " + matches.length + " result" + (matches.length === 1 ? "" : "s");
+          if (!addable.length) {
+            addAllBtn.disabled = true;
+            addAllBtn.textContent = free
+              ? "All matching topics are already shown"
+              : "Comparison is full (" + MAX_COMPARE + " topics) — remove one to add another";
+          } else {
+            addAllBtn.textContent =
+              addable.length === matches.length
+                ? "+ Add all " + matches.length + " result" + (matches.length === 1 ? "" : "s")
+                : "+ Add the first " + addable.length + " (up to " + MAX_COMPARE + " topics are compared)";
+          }
           addAllBtn.addEventListener("click", () => {
-            matches.forEach((t) => addToSelection(t.topic_id));
+            addable.forEach((t) => addToSelection(t.topic_id));
             renderSelectedTopics();
             render(); // refresh checkmarks without closing the dropdown
           });
@@ -554,17 +604,19 @@
       });
     }
 
-    // Rebuilds the chip bar and the stacked chart list from
+    // Rebuilds the chip bar and the comparison chart from
     // `selectedTopicIds`. Called after any change to the selection.
     function renderSelectedTopics() {
       const bar = document.getElementById("selected-topics-bar");
       const chipsEl = document.getElementById("selected-topics-chips");
       const countEl = document.getElementById("selected-topics-count");
-      const listEl = document.getElementById("topic-chart-list");
-      const emptyEl = document.getElementById("topic-chart-empty");
+      const noteEl = document.getElementById("compare-limit-note");
 
       countEl.textContent = selectedTopicIds.length;
       bar.hidden = selectedTopicIds.length === 0;
+      noteEl.hidden = !limitHit;
+      limitHit = false;
+      document.getElementById("add-trendy-btn").disabled = selectedTopicIds.length >= MAX_COMPARE;
 
       chipsEl.innerHTML = "";
       selectedTopicIds.forEach((id) => {
@@ -572,7 +624,12 @@
         if (!t) return;
         const li = document.createElement("li");
         li.className = "selected-topics__chip";
-        const label = document.createElement("span");
+        li.title = (t.keywords || []).join(", ");
+        const swatch = document.createElement("span");
+        swatch.className = "selected-topics__swatch";
+        swatch.style.background = topicColor(id);
+        const label = document.createElement("a");
+        label.href = fillUrl(urls.topicPage, { ID: id });
         label.textContent = (t.is_trendy ? "▲ " : "") + t.name;
         const remove = document.createElement("button");
         remove.type = "button";
@@ -580,84 +637,91 @@
         remove.setAttribute("aria-label", "Remove " + t.name);
         remove.textContent = "×";
         remove.addEventListener("click", () => toggleSelection(id));
+        li.appendChild(swatch);
         li.appendChild(label);
         li.appendChild(remove);
         chipsEl.appendChild(li);
       });
 
-      listEl.innerHTML = "";
-      emptyEl.hidden = selectedTopicIds.length !== 0;
-      selectedTopicIds.forEach((id) => {
-        const t = topicsById.get(id);
-        if (!t) return;
-        const block = document.createElement("div");
-        block.className = "topic-chart-block";
-        const heading = document.createElement("h3");
-        heading.className = "topic-chart-block__title";
-        heading.textContent = (t.is_trendy ? "▲ " : "") + t.name;
-        const chartDiv = document.createElement("div");
-        chartDiv.id = "topic-chart-" + id;
-        chartDiv.className = "chart chart--tall";
-        const kwDiv = document.createElement("div");
-        kwDiv.id = "topic-keywords-" + id;
-        kwDiv.className = "keyword-chips";
-        block.appendChild(heading);
-        block.appendChild(chartDiv);
-        block.appendChild(kwDiv);
-        listEl.appendChild(block);
-        renderOneTopicChart(id);
-      });
+      renderCompareChart();
     }
 
-    function renderOneTopicChart(topicId) {
-      const chartId = "topic-chart-" + topicId;
-      const kwId = "topic-keywords-" + topicId;
-      fetch(fillUrl(urls.timeline, { ID: topicId }))
-        .then((r) => r.json())
-        .then((res) => {
-          // The selection (and so the DOM) may have changed again before
-          // this fetch resolved -- bail rather than plot into a stale/gone div.
-          if (!document.getElementById(chartId)) return;
+    function fetchTimeline(id) {
+      if (!timelineCache.has(id)) {
+        timelineCache.set(id, fetch(fillUrl(urls.timeline, { ID: id })).then((r) => r.json()));
+      }
+      return timelineCache.get(id);
+    }
 
+    // All selected topics on one chart: actual mentions as a solid line in
+    // the topic's colour, the model's prediction as a dotted line in the
+    // same colour (toggled together from the legend).
+    function renderCompareChart() {
+      const chartEl = document.getElementById("compare-chart");
+      const emptyEl = document.getElementById("topic-chart-empty");
+      const ids = selectedTopicIds.slice();
+      emptyEl.hidden = ids.length !== 0;
+      chartEl.hidden = ids.length === 0;
+      if (!ids.length) {
+        Plotly.purge(chartEl);
+        return;
+      }
+      const showPredicted = document.getElementById("compare-show-predicted").checked;
+
+      Promise.all(ids.map(fetchTimeline)).then((results) => {
+        // The selection may have changed again while fetching.
+        if (ids.join() !== selectedTopicIds.join()) return;
+        const traces = [];
+        results.forEach((res, i) => {
+          const id = ids[i];
+          const color = topicColor(id);
+          const name = truncate(res.topic.name, 60);
           const months = res.timeline.map((row) => row.month);
-          const actual = {
+          traces.push({
             x: months,
             y: res.timeline.map((row) => row.actual_count),
-            name: "Actual",
+            name,
+            legendgroup: String(id),
+            customdata: months.map(() => id),
             mode: "lines+markers",
-            line: { color: "#2B6E68", width: 2 },
-            marker: { size: 5 },
-          };
-          const predicted = {
-            x: months,
-            y: res.timeline.map((row) => row.predicted_count),
-            name: "Predicted",
-            mode: "lines",
-            line: { color: "#D98A3D", width: 2, dash: "dot" },
-          };
-          Plotly.newPlot(
-            chartId,
-            [actual, predicted],
-            baseLayout({ yaxis: { title: "Mentions / month", gridcolor: "#E8EAED", rangemode: "tozero" } }),
-            PLOTLY_CONFIG
-          );
-
-          document.getElementById(chartId).on("plotly_click", (data) => {
-            const month = data.points[0].x;
-            goToMonth(urls, topicId, month);
+            line: { color, width: 2 },
+            marker: { color, size: 4 },
+            hovertemplate: "<b>%{y}</b> mentions \u00b7 %{x|%b %Y}<br>Click to read the papers<extra>" + escapeHtml(name) + "</extra>",
           });
-
-          const kwContainer = document.getElementById(kwId);
-          if (kwContainer) {
-            kwContainer.innerHTML = "";
-            (res.topic.keywords || []).forEach((kw) => {
-              const chip = document.createElement("span");
-              chip.className = "chip";
-              chip.textContent = kw;
-              kwContainer.appendChild(chip);
+          if (showPredicted) {
+            traces.push({
+              x: months,
+              y: res.timeline.map((row) => row.predicted_count),
+              name: name + " (predicted)",
+              legendgroup: String(id),
+              showlegend: false,
+              customdata: months.map(() => id),
+              mode: "lines",
+              line: { color, width: 1.5, dash: "dot" },
+              opacity: 0.85,
+              hovertemplate: "%{y:.1f} predicted \u00b7 %{x|%b %Y}<extra>" + escapeHtml(name) + "</extra>",
             });
           }
         });
+        Plotly.react(
+          chartEl,
+          traces,
+          baseLayout({
+            height: 440,
+            margin: { t: 10, r: 20, b: 40, l: 50 },
+            legend: { orientation: "h", x: 0, y: -0.12, yanchor: "top" },
+            yaxis: { title: "Mentions / month", gridcolor: "#E8EAED", rangemode: "tozero" },
+          }),
+          PLOTLY_CONFIG
+        );
+        if (!chartEl.dataset.clickBound) {
+          chartEl.dataset.clickBound = "1";
+          chartEl.on("plotly_click", (data) => {
+            const p = data.points[0];
+            goToMonth(urls, p.customdata, p.x);
+          });
+        }
+      });
     }
   }
 

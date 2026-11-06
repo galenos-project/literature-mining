@@ -60,8 +60,9 @@
 <section class="panel panel--explorer">
   <div class="panel__head panel__head--row">
     <div>
-      <h2>Explore topics</h2>
-      <p class="panel__hint">Blue = actual mentions, amber = model-predicted mentions. Click any month to read the papers.</p>
+      <h2>Compare topics</h2>
+      <p class="panel__hint">Add up to 5 topics to compare them on one chart. Solid lines are actual monthly mentions,
+        dotted lines the model's predictions. Click any point to read that month's papers.</p>
     </div>
     <div class="topic-picker">
       <div class="topic-search">
@@ -78,7 +79,7 @@
           <option value="" selected disabled>Choose a topic&hellip;</option>
         </select>
       </label>
-      <button type="button" id="add-trendy-btn" class="link-btn">+ Add all trending topics</button>
+      <button type="button" id="add-trendy-btn" class="link-btn">+ Add top trending topics</button>
     </div>
   </div>
 
@@ -88,19 +89,12 @@
       <button type="button" id="clear-selected-btn" class="link-btn">Clear all</button>
     </div>
     <ul id="selected-topics-chips" class="selected-topics__chips"></ul>
+    <p id="compare-limit-note" class="selected-topics__note" hidden>Up to 5 topics can be compared at once &mdash; remove one to add another.</p>
   </div>
 
-  <div id="topic-chart-list" class="topic-chart-list"></div>
+  <label class="compare-toggle"><input type="checkbox" id="compare-show-predicted" checked> Show model predictions</label>
+  <div id="compare-chart" class="chart" hidden></div>
   <p id="topic-chart-empty" class="empty-state" hidden>No topics selected. Search or pick one above to see its chart.</p>
-</section>
-
-<section class="panel panel--spaced">
-  <div class="panel__head">
-    <h2>Study types</h2>
-    <p class="panel__hint">All papers in the corpus by study design, split into published and grey literature
-      (preprints, theses, conference abstracts). Study designs are classified automatically from the abstract.</p>
-  </div>
-  {% include "_study_types.html" %}
 </section>
 
 <section class="panel panel--spaced">
@@ -111,6 +105,15 @@
       Topics in the lower left are mostly observational. Trending topics are in red. Click a bubble to open the topic.</p>
   </div>
   {% include "_evidence_map.html" %}
+</section>
+
+<section class="panel panel--spaced">
+  <div class="panel__head">
+    <h2>Study types</h2>
+    <p class="panel__hint">All papers in the corpus by study design, split into published and grey literature
+      (preprints, theses, conference abstracts). Study designs are classified automatically from the abstract.</p>
+  </div>
+  {% include "_study_types.html" %}
 </section>
 {% endblock %}
 

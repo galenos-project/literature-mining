@@ -10,13 +10,11 @@ GRU time-series model &rarr; trendiness ranking.
 
 - **Front page** — corpus stats, a "trending now" ticker, a multi-line
   chart of the top trending topics' mentions over the last 10 years, a
-  topic explorer with actual-vs-predicted timelines, a breakdown of all
-  papers by study type, and a topic evidence map (one bubble per topic,
-  placed by its share of trials/systematic reviews and of pre-clinical
-  studies; trending topics in red).
-- **Topic explorer** — pick any topic from a dropdown to see its full
-  monthly timeline (actual mentions vs the model's predicted mentions,
-  matching the blue/orange convention in the paper's figures).
+  topic comparison chart (search or pick up to 5 topics to see their
+  actual and predicted monthly mentions on one chart), a topic evidence
+  map (one bubble per topic, placed by its share of trials/systematic
+  reviews and of pre-clinical studies; trending topics in red), and a
+  breakdown of all papers by study type.
 - **Topic page** — the topic's timeline, its papers by study type, its
   history across monthly updates, and related topics (sharing at least 8
   of 15 keywords, or more than half of the smaller topic's papers).

@@ -512,29 +512,30 @@ a:focus-visible, select:focus-visible, button:focus-visible {
 }
 .selected-topics__chip-remove:hover { background: rgba(43, 110, 104, 0.18); }
 
-/* ---- Stacked per-topic charts ------------------------------------------*/
+/* ---- Topic comparison chart --------------------------------------------*/
 
-.topic-chart-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2rem;
+.selected-topics__swatch {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.selected-topics__chip a { color: var(--ink); }
+.selected-topics__chip a:hover { text-decoration: underline; }
+.selected-topics__note { margin: 0.5rem 0 0; font-size: 0.8rem; color: var(--trend); }
+
+.compare-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+  margin-bottom: 0.5rem;
+  cursor: pointer;
 }
 
-.topic-chart-block {
-  padding-top: 1.5rem;
-  border-top: 1px solid var(--line);
-}
-.topic-chart-block:first-child {
-  padding-top: 0;
-  border-top: none;
-}
-
-.topic-chart-block__title {
-  font-family: var(--font-display);
-  font-size: 1.05rem;
-  font-weight: 600;
-  margin: 0 0 0.75rem;
-}
+.link-btn:disabled { color: var(--muted); cursor: default; text-decoration: none; }
+.topic-search__addall:disabled { color: var(--muted); cursor: default; background: none; }
 
 .keyword-chips {
   display: flex;
