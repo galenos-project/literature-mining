@@ -57,6 +57,27 @@
   <div id="trend-chart" class="chart chart--tall"></div>
 </section>
 
+<div class="panel-pair">
+  <section class="panel">
+    <div class="panel__head">
+      <h2>Top trending topics</h2>
+      <p class="panel__hint">Trendiness score: how far a topic's recent monthly mentions exceed the model's
+        prediction, weighted towards the latest months and adjusted for topic size. Click a bar to open the topic.</p>
+    </div>
+    <div id="rank-bars" class="chart" role="img"
+         aria-label="Horizontal bar chart of the {{ top_bars.trending|length }} topics with the highest trendiness score."></div>
+  </section>
+  <section class="panel">
+    <div class="panel__head">
+      <h2>Largest topics</h2>
+      <p class="panel__hint">Number of papers assigned to each topic over the 10-year window
+        (&#9650; = currently trending). Click a bar to open the topic.</p>
+    </div>
+    <div id="size-bars" class="chart" role="img"
+         aria-label="Horizontal bar chart of the {{ top_bars.largest|length }} topics with the most papers."></div>
+  </section>
+</div>
+
 <section class="panel panel--explorer">
   <div class="panel__head panel__head--row">
     <div>
@@ -130,6 +151,7 @@
   };
   window.GALENOS_STUDY_TYPES = {{ study_types | tojson }};
   window.GALENOS_EVIDENCE_MAP = {{ evidence_map | tojson }};
+  window.GALENOS_TOP_BARS = {{ top_bars | tojson }};
 </script>
 {% endblock %}
 

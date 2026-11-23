@@ -9,7 +9,9 @@ GRU time-series model &rarr; trendiness ranking.
 ## What it does
 
 - **Front page** — corpus stats, a "trending now" ticker, a multi-line
-  chart of the top trending topics' mentions over the last 10 years, a
+  chart of the top trending topics' mentions over the last 10 years,
+  side-by-side bar charts of the 10 top trending topics (by trendiness
+  score) and the 10 largest topics (by papers; `TOP_BARS_N` in `app.py`), a
   topic comparison chart (search or pick up to 5 topics to see their
   actual and predicted monthly mentions on one chart), a topic evidence
   map (one bubble per topic, placed by its share of trials/systematic

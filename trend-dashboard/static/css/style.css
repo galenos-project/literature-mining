@@ -216,6 +216,17 @@ a:focus-visible, select:focus-visible, button:focus-visible {
   .stats-strip { grid-template-columns: repeat(2, 1fr); }
 }
 
+/* Two panels side by side (top trending / largest topics); stacked on narrow screens. */
+.panel-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.5rem;
+  margin: 1.5rem 0;
+}
+@media (max-width: 880px) {
+  .panel-pair { grid-template-columns: 1fr; }
+}
+
 .panel {
   background: var(--paper-raised);
   border: 1px solid var(--line);

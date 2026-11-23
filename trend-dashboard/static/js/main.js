@@ -149,6 +149,70 @@
     );
   }
 
+  // ---- Top trending / largest topics (index page) -------------------------
+
+  // One horizontal bar per topic, largest first, with the topic's name on
+  // its own line above the bar (so long names fit a half-width panel) and
+  // the value at the bar tip. `rows` come from app.py's top_bars;
+  // opts.valueKey is "trend_rank" or "n_papers".
+  function renderTopicBars(elId, rows, opts) {
+    const el = document.getElementById(elId);
+    if (!el || !rows || !rows.length) return;
+    // Non-numeric row keys: Plotly reads number-like strings ("34") as
+    // positions, even on a category axis.
+    const ys = rows.map((r) => "topic-" + r.topic_id);
+    const values = rows.map((r) => r[opts.valueKey] || 0);
+    const maxV = Math.max(...values);
+    const narrow = el.clientWidth < 460;
+    const annotations = rows.map((r, i) => ({
+      x: 0, y: ys[i], xref: "x", yref: "y",
+      xanchor: "left", yanchor: "bottom", yshift: 9, showarrow: false,
+      text: `${i + 1}. ${escapeHtml(truncate(r.name, narrow ? 46 : 64))}` +
+        (opts.markTrendy && r.is_trendy ? ' <span style="color:#B5423A">\u25B2</span>' : ""),
+      font: { family: "Inter, sans-serif", size: 12, color: "#1B2233" },
+      captureevents: true,
+    }));
+    Plotly.newPlot(
+      elId,
+      [{
+        type: "bar",
+        orientation: "h",
+        x: values,
+        y: ys,
+        customdata: rows.map((r) => r.topic_id),
+        text: values.map(opts.format),
+        textposition: "outside",
+        cliponaxis: false,
+        textfont: { family: "Inter, sans-serif", size: 11, color: "#3D4457" },
+        marker: { color: opts.color },
+        hovertext: rows.map((r) =>
+          `<b>${escapeHtml(r.name)}</b><br>${opts.hoverLabel}: ${opts.format(r[opts.valueKey] || 0)}` +
+          (opts.valueKey !== "n_papers" ? `<br>${r.n_papers.toLocaleString()} papers` : "") +
+          "<br>Click to open the topic"),
+        hovertemplate: "%{hovertext}<extra></extra>",
+      }],
+      baseLayout({
+        height: 70 + rows.length * 46,
+        bargap: 0.62,
+        barcornerradius: 4,
+        showlegend: false,
+        margin: { t: 22, r: 48, b: 42, l: 8 },
+        xaxis: {
+          title: { text: opts.axisTitle, font: { size: 12 } },
+          gridcolor: "#E8EAED", zeroline: false, range: [0, maxV * 1.1], fixedrange: true,
+          nticks: narrow ? 4 : 6, tickformat: opts.tickformat || "",
+        },
+        // Topic ids as categories (not numbers), one row each.
+        yaxis: { type: "category", autorange: "reversed", showticklabels: false, showgrid: false, fixedrange: true },
+        annotations,
+      }),
+      PLOTLY_CONFIG
+    );
+    const open = (id) => { window.location.href = fillUrl(window.GALENOS.urls.topicPage, { ID: id }); };
+    el.on("plotly_click", (data) => open(data.points[0].customdata));
+    el.on("plotly_clickannotation", (e) => open(rows[e.index].topic_id));
+  }
+
   // ---- Topic evidence map (index page) ------------------------------------
 
   const EVIDENCE_COLORS = { trending: "#B5423A", established: "#B7BBC2" };
@@ -777,6 +841,15 @@
       initTopicPage();
     } else {
       initIndexPage();
+      const bars = window.GALENOS_TOP_BARS || {};
+      renderTopicBars("rank-bars", bars.trending, {
+        valueKey: "trend_rank", color: "#B5423A", format: (v) => v.toFixed(1),
+        axisTitle: "Trendiness score", hoverLabel: "Trendiness score",
+      });
+      renderTopicBars("size-bars", bars.largest, {
+        valueKey: "n_papers", color: "#2B6E68", format: (v) => v.toLocaleString(),
+        axisTitle: "Papers", hoverLabel: "Papers", markTrendy: true, tickformat: "~s",
+      });
       renderEvidenceMap("evidence-map-chart", window.GALENOS_EVIDENCE_MAP);
     }
     renderStudyTypeChart("study-type-chart", window.GALENOS_STUDY_TYPES);

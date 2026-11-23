@@ -4,6 +4,14 @@ import db
 from config import Config
 
 
+# Topics per panel in the front page's "top trending" / "largest" bar charts.
+TOP_BARS_N = 10
+
+
+def _bar(t):
+    return {k: t[k] for k in ("topic_id", "name", "n_papers", "is_trendy", "trend_rank")}
+
+
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
@@ -27,6 +35,10 @@ def create_app():
             trendy_topics=trendy_topics[:12],
             default_topic_ids=default_ids,
             study_types=db.get_study_type_counts(conn),
+            top_bars={
+                "trending": [_bar(t) for t in trendy_topics[:TOP_BARS_N]],
+                "largest": [_bar(t) for t in sorted(topics, key=lambda t: -t["n_papers"])[:TOP_BARS_N]],
+            },
             evidence_map=db.get_topic_evidence(conn),
         )
 
