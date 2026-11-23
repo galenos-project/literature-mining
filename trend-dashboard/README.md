@@ -89,6 +89,45 @@ page's related topics; thresholds `RELATED_MIN_KEYWORDS` and
 `RELATED_MIN_PAPER_SHARE` in the importer). Running the importer with no
 arguments just rebuilds these two tables.
 
+### Chart images for other websites
+
+Static SVG versions of the home page charts, in their default
+presentation, are served at:
+
+| Chart | URL path |
+|---|---|
+| Monthly mentions of the 10 top trending topics | `/static/exports/topic-mentions-over-time.svg` |
+| Top 10 trending topics (trendiness score) | `/static/exports/top-trending-topics.svg` |
+| 10 largest topics (papers) | `/static/exports/largest-topics.svg` |
+| Compare topics (default: the top trending topic) | `/static/exports/compare-topics.svg` |
+| Topic evidence map | `/static/exports/topic-evidence-map.svg` |
+| Study types | `/static/exports/study-types.svg` |
+
+Each has a title and a source line (data month and, if set, the live
+site's address from `GALENOS_PUBLIC_URL` in `.env`), a white background,
+and is at most 1320px wide (the two bar charts 800px). To embed one with a
+link back to the dashboard:
+
+```html
+<a href="https://YOUR-LIVE-SITE/">
+  <img src="https://YOUR-LIVE-SITE/static/exports/topic-evidence-map.svg"
+       alt="GALENOS topic evidence map" style="max-width:100%">
+</a>
+```
+
+`scripts/export_chart_images.py` makes them by opening the home page in a
+headless browser and exporting each chart with Plotly, so they always match
+the live charts. The monthly update runs it after reloading the database
+(a failure there is only a warning). It needs Playwright and a browser,
+once per machine:
+
+```bash
+pip install playwright
+playwright install chromium        # on Ubuntu, if it complains about missing
+                                   # libraries: sudo playwright install-deps chromium
+python scripts/export_chart_images.py
+```
+
 ## Monthly batch updates
 
 `scripts/update_data_monthly.py` runs the full pipeline in one command,
@@ -188,6 +227,7 @@ scripts/
   init_db.py                    Create/reset the database
   generate_sample_data.py       Synthetic demo dataset
   import_notebook_outputs.py    Template loader for real exports
+  export_chart_images.py        Static SVGs of the home page charts (static/exports/)
 templates/                      Jinja2 pages (base, index, topic, month, 404)
 static/css/style.css            Design system
 static/js/main.js               Plotly charts + dropdown + click-through

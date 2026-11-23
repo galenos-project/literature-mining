@@ -7,3 +7,4 @@ bertopic
 torch
 openai
 nltk
+playwright   # scripts/export_chart_images.py; also run `playwright install chromium` once

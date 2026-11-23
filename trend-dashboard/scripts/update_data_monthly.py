@@ -1387,6 +1387,14 @@ def reload_database(paths):
         check=True,
     )
     print("Database reloaded.")
+    # Static SVGs of the home page charts (static/exports/) for embedding on
+    # other sites. Not fatal: the database is already live if this fails
+    # (e.g. Playwright or its browser not installed on this machine).
+    print("Exporting home page chart images...")
+    result = subprocess.run(["python3", os.path.join(scripts_dir, "export_chart_images.py")])
+    if result.returncode != 0:
+        print("  WARNING: chart image export failed; the previous images (if any) are still served. "
+              "Run scripts/export_chart_images.py by hand once it's fixed.")
 
 
 
